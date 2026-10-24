@@ -3286,7 +3286,7 @@ export const register: Register = on => {
         // Desktop: chat bubbles with a row for their actions underneath; in groups other people's messages carry an avatar and a name.
         const showFace = !m.mine && !!group
         return (
-          <Box key={'msg-' + m.key} flexDirection="column" alignItems={m.mine ? 'flex-end' : 'flex-start'} marginTop={sameRun ? 'xs' : 'md'}>
+          <Box key={'msg-' + m.key} flexDirection="column" alignItems={m.mine ? 'flex-end' : 'flex-start'} marginTop={sameRun ? undefined : 'xs'}>
             {day}
             {showFace && !sameRun && (
               <Box paddingLeft={5}><Text size="caption" weight="semibold" color={color}>{name}</Text></Box>
@@ -3454,7 +3454,7 @@ export const register: Register = on => {
               )}
             {newerButton}
             {/* The row under the field keeps its focus ring inside the pane, where the clipping cannot reach it. */}
-            <Box flexDirection="row" alignItems="flex-start" columnGap={1} width="100%" flexShrink={0} paddingBottom="sm">
+            <Box flexDirection="row" alignItems="flex-start" columnGap={1} width="100%" flexShrink={0} paddingBottom="xs">
               {attachButton}
               <Box flexDirection="column" alignItems="stretch" flexGrow={1} flexShrink={1}>{composer}</Box>
             </Box>
