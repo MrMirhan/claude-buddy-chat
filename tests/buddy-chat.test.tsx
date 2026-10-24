@@ -1272,3 +1272,28 @@ test('backup: a restored identity loads its backup and stays the main device', a
   files.set('/home/test/other/account.backup', JSON.stringify({ v: 1, kind: 'buddy-chat-backup', id: idOf(other), nonce: b64(nonce), box: b64(box) }))
   expect((await run($, 'buddy-backup', 'load ~/other')).text).toContain('başka bir hesaba')
 })
+
+test('backup: the folder comes from the system dialog; without one a path field appears', async ($, on) => {
+  const mine = nacl.box.keyPair()
+  const files = new Map<string, string>()
+  memoryFs(on, files)
+  let dialog = true
+  on('process.run', (_, e) => {
+    const argv = (e as { argv: string[] }).argv
+    if (argv[0] === 'osascript' && dialog) return { value: { exitCode: 0, stdout: '/Users/test/Yedek/\n', stderr: '' } } as never
+    throw new Error('not found')
+  })
+  setup(on, { ...V4, secretKey: b64(mine.secretKey) })
+  await start($)
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-people' })
+  expect(await ui.find({ key: 'backup-path' })).toBeUndefined()
+  await ui.press({ key: 'backup-choose' })
+  expect([...files.keys()].some(p => p.startsWith('/Users/test/Yedek/buddy-chat-') && p.endsWith('/account.backup'))).toBe(true)
+
+  dialog = false
+  await ui.press({ key: 'backup-load' })
+  await ui.redraw()
+  expect(await ui.find({ key: 'backup-path' })).toBeDefined()
+  await ui.unmount()
+})

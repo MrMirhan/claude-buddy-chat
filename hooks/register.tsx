@@ -200,6 +200,8 @@ let restoreSeq = 0
 let shownWords: string[] = []
 let backupDir = ''
 let backupAt = 0
+// No folder dialog could open here, so the card shows a field for a typed path.
+let pickerMissing = false
 let groupSeq = 0
 let pollerAt = 0
 // Terminal: the message j/k marked; its actions take one key (e, x, f). Empty: no mark.
@@ -1100,6 +1102,31 @@ async function restoreFromWords($: EngineInterface, text: string): Promise<strin
   if (contacts.length && !(await confirm($, t('restoreConfirm'), t('restoreYes')))) return t('linkCancelled')
   await resetAccount($, entropy)
   return t('restoreDone')
+}
+
+// Opens the system's folder dialog: AppleScript on macOS, zenity on Linux, PowerShell on Windows.
+// Resolves to the folder, or undefined when cancelled; with no dialog at all it turns on the typed-path field.
+async function chooseFolder($: EngineInterface, prompt: string): Promise<string | undefined> {
+  const tries: string[][] = [
+    ['osascript', '-e', 'POSIX path of (choose folder with prompt ' + JSON.stringify(prompt) + ')'],
+    ['zenity', '--file-selection', '--directory', '--title=' + prompt],
+    ['powershell', '-NoProfile', '-Command',
+      'Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; if ($d.ShowDialog() -eq "OK") { $d.SelectedPath }'],
+  ]
+  for (const argv of tries) {
+    let result
+    try {
+      result = await $.process.run(argv, { timeoutMs: 300_000 })
+    } catch {
+      continue
+    }
+    const path = result.stdout.trim()
+    return result.exitCode === 0 && path ? path.replace(/\/+$/, '') : undefined
+  }
+  pickerMissing = true
+  $.ui.invalidate('ui.render')
+  $.ui.toast(t('backupNoPicker'))
+  return undefined
 }
 
 async function expandPath($: EngineInterface, path: string): Promise<string> {
@@ -2515,20 +2542,27 @@ export const register: Register = on => {
         <Text dimColor size="footnote">
           {backupDir ? t('backupOn', { path: backupDir, when: backupAt ? shortWhen(backupAt, now) : t('backupNever') }) : t('backupHint')}
         </Text>
-        {Input && (
-          <Input key="backup-dir" placeholder={t('backupPlaceholder')} value={backupDir} submitLabel={t('save')}
-            onSubmit={async (value: string) => toast(await setBackupDir($, value))} />
-        )}
-        {backupDir && (
-          <Box flexDirection="row" columnGap={graphic ? 1 : 2}>
-            <Button key="backup-now" label={t('backupNow')} plain={graphic ? undefined : true} onPress={async () => toast(await writeBackup($))} />
-            <Button key="backup-off" label={t('backupTurnOff')} plain dimColor onPress={async () => toast(await setBackupDir($, ''))} />
-          </Box>
-        )}
-        {Input && (
-          <Input key={'backup-load' + (restoreSeq ? '-' + restoreSeq : '')} placeholder={t('backupLoadPlaceholder')} value="" submitLabel={t('backupLoadSubmit')}
+        <Box flexDirection="row" columnGap={graphic ? 1 : 2} rowGap={1} flexWrap="wrap">
+          <Button key="backup-choose" label={backupDir ? t('backupChange') : t('backupChoose')} plain={graphic ? undefined : true}
+            variant={graphic && !backupDir ? 'primary' : undefined}
+            onPress={async () => {
+              const picked = await chooseFolder($, t('backupChoosePrompt'))
+              if (picked) toast(await setBackupDir($, picked))
+            }} />
+          {backupDir && <Button key="backup-now" label={t('backupNow')} plain={graphic ? undefined : true} onPress={async () => toast(await writeBackup($))} />}
+          {backupDir && <Button key="backup-off" label={t('backupTurnOff')} plain dimColor onPress={async () => toast(await setBackupDir($, ''))} />}
+          <Button key="backup-load" label={t('backupLoadButton')} plain={graphic ? undefined : true} dimColor
+            onPress={async () => {
+              const picked = await chooseFolder($, t('backupLoadPrompt'))
+              if (picked) toast(await loadBackup($, picked))
+            }} />
+        </Box>
+        {/* Where no folder dialog opens, the path is typed: a folder to back up into, or "load <folder>" to restore. */}
+        {pickerMissing && Input && (
+          <Input key={'backup-path' + (restoreSeq ? '-' + restoreSeq : '')} placeholder={t('backupPathPlaceholder')} value="" submitLabel={t('save')}
             onSubmit={async (value: string) => {
-              toast(await loadBackup($, value))
+              const v = value.trim()
+              toast(v.startsWith('load ') ? await loadBackup($, v.slice(5)) : await setBackupDir($, v))
               restoreSeq++
               redraw()
             }} />
