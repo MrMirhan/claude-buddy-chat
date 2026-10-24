@@ -97,9 +97,14 @@ let composeSeq = 0
 let addSeq = 0
 let groupSeq = 0
 let pollerAt = 0
-// How many messages above the ones that fit the user asked to see with "older messages"; reset when the chat changes.
+// A chat shows its last THREAD_WINDOW messages plus whatever the user loaded above them; reset when the chat changes.
 let olderExtra = 0
+const THREAD_WINDOW = 30
 const OLDER_PAGE = 20
+// Read by the ui.scroll hook: whether the window sits at the newest message, and what the open chat hides above.
+let atBottom = true
+let hiddenAbove = 0
+let firstShownKey = ''
 
 const composeKey = (conv: string) => 'compose-' + conv + (composeSeq ? '-' + composeSeq : '')
 let lineCopied = false
@@ -471,6 +476,7 @@ async function refresh($: EngineInterface, quiet = false) {
   if (next !== signature) {
     signature = next
     $.ui.invalidate('ui.render')
+    if (threadOpen && atBottom) scrollToEnd($)
   }
 }
 
@@ -637,6 +643,8 @@ async function sendText($: EngineInterface, conv: string, text: string): Promise
   shown.add(id)
   await addMessages($, [{ key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true }])
   $.ui.invalidate('ui.render')
+  atBottom = true
+  scrollToEnd($)
   return result.missed.length ? { ok: false, text: partialText(result.missed), sent: true } : { ok: true, text: t('sent'), sent: true }
 }
 
@@ -804,8 +812,21 @@ async function select($: EngineInterface, conv: string) {
   olderExtra = 0
   view = 'chats'
   threadOpen = true
+  atBottom = true
   await $.store.set('readAt', readAt)
   $.ui.invalidate('ui.render')
+  scrollToEnd($)
+}
+
+const scrollToEnd = ($: EngineInterface) => { void $.ui.scroll({ to: 'end', in: PANE }).catch(() => {}) }
+
+// Loads one page of older messages and keeps the message that was at the top where it was.
+function loadOlder($: EngineInterface) {
+  if (hiddenAbove <= 0) return
+  const anchor = firstShownKey
+  olderExtra += OLDER_PAGE
+  $.ui.invalidate('ui.render')
+  if (anchor) void $.ui.scroll({ to: { key: 'msg-' + anchor }, in: PANE, block: 'start' }).catch(() => {})
 }
 
 async function closeThread($: EngineInterface) {
@@ -1058,6 +1079,13 @@ export const register: Register = on => {
     return { result: (await sendText($, conv.id, text)).text }
   })
 
+  on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
+    const result = await next(e)
+    atBottom = e.offset + e.bodyRows >= e.contentRows - 1
+    if (threadOpen && e.by < 0 && e.offset <= 0) loadOlder($)
+    return result
+  })
+
   // A Desktop chat row posts { open } when it is clicked anywhere.
   on('ui.message', { requestId: PANE }, async ($, e) => {
     const open = (e.data as { open?: unknown } | null)?.open
@@ -1075,7 +1103,6 @@ export const register: Register = on => {
     const Svg = graphic && 'Svg' in els ? els.Svg : undefined
     const Client = e.surface === 'desktop' && 'Client' in els ? els.Client : undefined
     const cols = Math.max(20, e.props.bodyColumns)
-    const rows = e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 24
     const now = await $.clock.now()
     if (!selected && !graphic) selected = conversations()[0]?.id ?? ''
     const convs = conversations()
@@ -1530,24 +1557,14 @@ export const register: Register = on => {
       .sort((a, b) => a.m.at - b.m.at || a.i - b.i)
       .map(x => x.m)
     const editTarget = thread.find(m => m.key === editing && m.mine && !m.deleted)
-    const room = Math.max(4, rows - (graphic ? 8 : 10))
-    const width = Math.max(10, cols - 6)
-    const visible: Msg[] = []
-    let used = 0
-    for (let i = thread.length - 1; i >= 0; i--) {
-      const m = thread[i]
-      if (!m) continue
-      const height = Math.ceil(Math.max(1, textOf(m).length) / width) + (graphic ? 3 : 1)
-      if (used + height > room && visible.length) break
-      used += height
-      visible.unshift(m)
-    }
-    if (olderExtra > 0) visible.splice(0, visible.length, ...thread.slice(-Math.min(thread.length, visible.length + olderExtra)))
+    const visible = thread.slice(-Math.min(thread.length, THREAD_WINDOW + olderExtra))
     const hidden = thread.length - visible.length
+    hiddenAbove = hidden
+    firstShownKey = visible[0]?.key ?? ''
     const olderButton = hidden > 0 && (
       <Box justifyContent="center">
         <Button key="older" label={t('olderMessages', { count: hidden })} plain dimColor hotkey={graphic ? undefined : 'o'}
-          onPress={() => { olderExtra += OLDER_PAGE; redraw() }} />
+          onPress={() => loadOlder($)} />
       </Box>
     )
     const securityLine = group

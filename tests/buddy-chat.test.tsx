@@ -584,26 +584,28 @@ test('terminal: the text field does not grab the focus, and a write button with 
   await ui.unmount()
 })
 
-test('a thread is in time order even when replies were stored late, and older messages load on demand', async ($, on) => {
+test('a thread is in time order even when replies were stored late, and older messages load on demand and on scroll', async ($, on) => {
   const ahmet = nacl.box.keyPair()
   const conv = 'dm:' + idOf(ahmet)
   const msg = (key: string, text: string, at: number, mine: boolean) =>
     ({ key, conv, from: mine ? '' : idOf(ahmet), name: 'A', text, at, mine })
-  // Stored as a batch poll leaves them: both of mine first, then the reply that came in between.
-  const inbox = [msg('m1', 'ilk benim', 1000, true), msg('m2', 'son benim', 3000, true), msg('r1', 'aradaki cevap', 2000, false)]
+  const inbox = Array.from({ length: 35 }, (_, i) => msg('k' + i, 'mesaj ' + i, (i + 1) * 1000, i % 2 === 0))
+  // Stored last, as a late batch leaves it, but it is the oldest message of all.
+  inbox.push(msg('late', 'en eski cevap', 500, false))
   setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
   await start($)
 
-  const short = { ...pane('desktop'), props: { ...pane('desktop').props, scroll: { offset: 0, bodyRows: 12 } } }
-  const ui = await $.ui.mount(short)
+  const ui = await $.ui.mount(pane('desktop'))
   await openChat(ui, 'conv-' + conv)
-  expect(await ui.find({ type: 'Text', text: /^son benim$/ })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^aradaki cevap$/ })).toBeUndefined()
-  expect(await ui.find({ key: 'older' })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^mesaj 34$/ })).not.toBeUndefined()
+  // 36 messages in all: the newest 30 are mesaj 5 to mesaj 34.
+  expect(await ui.find({ type: 'Text', text: /^mesaj 5$/ })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^mesaj 4$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^en eski cevap$/ })).toBeUndefined()
 
   await ui.press({ key: 'older' })
-  expect(await ui.find({ type: 'Text', text: /^aradaki cevap$/ })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^ilk benim$/ })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^mesaj 0$/ })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^en eski cevap$/ })).not.toBeUndefined()
   expect(await ui.find({ key: 'older' })).toBeUndefined()
   await ui.unmount()
 })
