@@ -1,0 +1,476 @@
+import { expect, mock, test, type Engine } from 'claude-code/testing'
+import type { On } from 'claude-code'
+import nacl from '../hooks/vendor/nacl.js'
+import { ml_kem768 } from '../hooks/vendor/mlkem.js'
+
+type KP = { publicKey: Uint8Array; secretKey: Uint8Array }
+type Post = { url: string; body: string }
+type World = { feed: string[]; posts: Post[]; notes: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
+
+const enc = (s: string) => new TextEncoder().encode(s)
+const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
+function b64(bytes: Uint8Array) {
+  let s = ''
+  for (const b of bytes) s += String.fromCharCode(b)
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+const unb64 = (s: string) =>
+  Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), c => c.charCodeAt(0))
+const idOf = (kp: KP) => b64(kp.publicKey)
+const topicOf = (id: string) => 'https://ntfy.sh/buddy-chat-' + hex(nacl.hash(enc(id))).slice(0, 32)
+const friend = (kp: KP, nickname?: string) =>
+  ({ id: idOf(kp), state: 'friend', profile: { username: '', displayName: '' }, nickname, at: 0 })
+
+function envelope(from: KP, to: string, payload: object, signer?: KP) {
+  const nonce = nacl.randomBytes(24)
+  const box = nacl.box(enc(JSON.stringify(payload)), nonce, unb64(to), (signer ?? from).secretKey)
+  return JSON.stringify({ v: 3, from: idOf(from), nonce: b64(nonce), box: b64(box) })
+}
+function opened(post: Post | undefined, kp: KP) {
+  if (!post) return null
+  const env = JSON.parse(post.body)
+  const plain = nacl.box.open(unb64(env.box), unb64(env.nonce), unb64(env.from), kp.secretKey)
+  return plain ? JSON.parse(new TextDecoder().decode(plain)) : null
+}
+const to = (w: World, kp: KP) => w.posts.filter(p => p.url === topicOf(idOf(kp)))
+const sent = (w: World, kp: KP) => to(w, kp).filter(p => !['kem', 'pq'].includes(opened(p, kp)?.t))
+
+function setup(on: On, store: Record<string, unknown>, sessionId = 's1'): World {
+  const w: World = { feed: [], posts: [], notes: [], answer: { value: 'Gönderme' }, clock: undefined as never }
+  mock.store(on, store)
+  w.clock = mock.clock(on, { now: 1_800_000_000_000 })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: sessionId }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('tool.register', (_, e) => ({ value: { tool: 'mcp__buddy-chat__' + e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.copy', () => ({ value: { isCopied: true } }))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('ui.notify', (_, e) => { w.notes.push(String((e as { text?: string }).text ?? JSON.stringify(e))); return { value: { isSent: true, channel: 'terminal' } } as never })
+  on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+    const q = (e as unknown as { questions: { question: string }[] }).questions[0]?.question ?? ''
+    return { result: { questions: [], answers: { [q]: w.answer.value } } } as never
+  })
+  let n = 0
+  on('http.fetch', (_, e) => {
+    if (e.init?.method === 'POST') {
+      w.posts.push({ url: e.url, body: String(e.init.body) })
+      return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
+    }
+    const lines = w.feed.splice(0).map(m => JSON.stringify({ id: 'ev' + n++, event: 'message', time: 1_800_000_000, message: m }))
+    return { value: { status: 200, ok: true, headers: {}, text: lines.join('\n') } }
+  })
+  return w
+}
+
+// Runs a /buddy command as the user typing it in the prompt box would.
+const run = ($: Engine, command: string, args = '') =>
+  $.command.run({ command, args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+
+async function start($: Engine): Promise<string> {
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const r = await run($, 'buddy-id')
+  return /(?:ID'n|ID): (\S{43})/.exec(r.text ?? '')?.[1] ?? ''
+}
+
+const list = async ($: Engine) => (await run($, 'buddy-list')).text ?? ''
+const pane = (surface: 'terminal' | 'desktop') => ({
+  plugin: 'buddy-chat', component: 'Pane', requestId: 'buddy-chat', surface,
+  props: { title: 'Buddy chat', isFocused: true, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+}) as const
+const V4 = { version: 4, lang: 'tr' }
+
+test('request, accept, profile and a local nickname that never leaves this machine', async ($, on) => {
+  const w = setup(on, { ...V4, profile: { username: 'deniz', displayName: 'Deniz Kaya' } })
+  const me = await start($)
+  const ayse = nacl.box.keyPair()
+
+  await run($, 'buddy-add', '/buddy-add ' + idOf(ayse))
+  const req = opened(sent(w, ayse)[0], ayse)
+  expect(req?.t).toBe('request')
+  expect(req?.profile).toEqual({ username: 'deniz', displayName: 'Deniz Kaya' })
+  expect(await list($)).toContain('Yanıt bekleyen')
+
+  w.feed.push(envelope(ayse, me, { t: 'accept', id: 'a1', profile: { username: '@AYilmaz', displayName: 'Ayşe Yılmaz' } }))
+  await w.clock.advance(8000)
+  expect(await list($)).toContain('Ayşe Yılmaz · @ayilmaz')
+  expect(w.notes.some(n => n.includes('kabul etti'))).toBe(true)
+
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'friend-nick-' + idOf(ayse) })
+  await ui.input({ key: 'nick-' + idOf(ayse), text: 'Kanka' })
+  await ui.press({ key: 'tab-chats' })
+  expect((await ui.find({ type: 'Text', text: /Artık arkadaşsınız/ }))).toBeDefined()
+  await ui.unmount()
+  expect(await list($)).toContain('Kanka · @ayilmaz · Ayşe Yılmaz')
+
+  await run($, 'buddy-send', 'kanka selam kanka')
+  await run($, 'buddy-send', '@ayilmaz ikinci')
+  const texts = sent(w, ayse).slice(1).map(p => opened(p, ayse))
+  expect(texts.map(p => p?.text)).toEqual(['selam kanka', 'ikinci'])
+  expect(w.posts.some(p => JSON.stringify(opened(p, ayse)).includes('Kanka'))).toBe(false)
+})
+
+test('incoming request shows in Kişiler; dm before accept is dropped, after accept arrives', async ($, on) => {
+  const w = setup(on, V4)
+  const me = await start($)
+  const ayse = nacl.box.keyPair()
+  w.feed.push(
+    envelope(ayse, me, { t: 'request', id: 'r1', profile: { username: 'ayse', displayName: 'Ayşe' } }),
+    envelope(ayse, me, { t: 'dm', id: 'd0', name: 'Ayşe', text: 'erken mesaj' }),
+  )
+  await w.clock.advance(8000)
+  expect(w.notes.some(n => n.includes('seni eklemek istiyor'))).toBe(true)
+
+  const ui = await $.ui.mount(pane('terminal'))
+  await ui.press({ key: 'tab-people' })
+  expect(await ui.find({ type: 'Text', text: /Arkadaşlık istekleri/ })).toBeDefined()
+  await ui.press({ key: 'req-accept-' + idOf(ayse) })
+  expect(opened(sent(w, ayse)[0], ayse)?.t).toBe('accept')
+
+  w.feed.push(envelope(ayse, me, { t: 'dm', id: 'd1', name: 'Ayşe', text: 'artik geliyor' }))
+  await w.clock.advance(8000)
+  await ui.redraw()
+  expect((await ui.find({ type: 'Text', text: /artik geliyor/ }))?.text).toContain('artik geliyor')
+  expect(await ui.find({ type: 'Text', text: /erken mesaj/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('dm is end-to-end encrypted, forged and stranger messages are dropped, os notification fires', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const mallory = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  const me = await start($)
+  w.feed.push(
+    envelope(ahmet, me, { t: 'dm', id: 'm1', name: 'A', text: 'gercek mesaj' }),
+    envelope(ahmet, me, { t: 'dm', id: 'm2', name: 'A', text: 'sahte mesaj' }, mallory),
+    envelope(mallory, me, { t: 'dm', id: 'm3', name: 'M', text: 'yabanci mesaj' }),
+    'null',
+  )
+  await w.clock.advance(8000)
+  expect(w.notes).toEqual(['gercek mesaj'])
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount(pane(surface))
+    expect((await ui.find({ type: 'Text', text: /gercek mesaj/ }))).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /sahte|yabanci/ })).toBeUndefined()
+    await ui.unmount()
+  }
+
+  await run($, 'buddy-send', 'ahmet gizli selam')
+  expect(sent(w, ahmet)[0]?.body.includes('gizli')).toBe(false)
+  expect(opened(sent(w, ahmet)[0], ahmet)?.text).toBe('gizli selam')
+  expect(opened(sent(w, ahmet)[0], mallory)).toBeNull()
+})
+
+test('edit and delete: only the author can change a message, both directions', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const veli = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet'), friend(veli, 'Veli')] })
+  const me = await start($)
+  w.feed.push(
+    envelope(ahmet, me, { t: 'dm', id: 'm1', name: 'A', text: 'ilk hali' }),
+    envelope(veli, me, { t: 'edit', id: 'e0', ref: 'm1', text: 'veli bozdu' }),
+    envelope(ahmet, me, { t: 'edit', id: 'e1', ref: 'm1', text: 'son hali' }),
+  )
+  await w.clock.advance(8000)
+
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'conv-dm:' + idOf(ahmet) })
+  expect((await ui.find({ type: 'Text', text: /son hali/ }))?.text).toContain('(düzenlendi)')
+  expect(await ui.find({ type: 'Text', text: /veli bozdu/ })).toBeUndefined()
+
+  w.feed.push(envelope(ahmet, me, { t: 'delete', id: 'x1', ref: 'm1' }))
+  await w.clock.advance(8000)
+  await ui.redraw()
+  expect(await ui.find({ type: 'Text', text: /Bu mesaj silindi/ })).toBeDefined()
+
+  await ui.input({ key: 'compose-dm:' + idOf(ahmet), text: 'yazim hatsı' })
+  const mine = opened(sent(w, ahmet)[0], ahmet)
+  await ui.press({ key: 'edit-' + mine.id })
+  await ui.input({ key: 'editing-' + mine.id, text: 'yazım hatası' })
+  const edit = opened(sent(w, ahmet)[1], ahmet)
+  expect(edit).toMatchObject({ t: 'edit', ref: mine.id, text: 'yazım hatası' })
+  expect((await ui.find({ type: 'Text', text: /yazım hatası/ }))).toBeDefined()
+
+  w.answer.value = 'Sil'
+  await ui.press({ key: 'del-' + mine.id })
+  expect(opened(sent(w, ahmet)[2], ahmet)).toMatchObject({ t: 'delete', ref: mine.id })
+  await ui.unmount()
+})
+
+test('block is silent and drops everything; unfriend notifies the other side', async ($, on) => {
+  const spam = nacl.box.keyPair()
+  const ali = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(spam, 'Spam'), friend(ali, 'Ali')] })
+  const me = await start($)
+
+  w.answer.value = 'Engelle'
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'friend-block-' + idOf(spam) })
+  expect(sent(w, spam).length).toBe(0)
+  expect(await ui.find({ type: 'Text', text: /Engellenenler \(?1/ })).toBeDefined()
+
+  w.answer.value = 'Çıkar'
+  await ui.press({ key: 'friend-remove-' + idOf(ali) })
+  expect(opened(sent(w, ali)[0], ali)?.t).toBe('unfriend')
+  await ui.unmount()
+
+  w.feed.push(
+    envelope(spam, me, { t: 'request', id: 'r9', profile: { username: 'spam', displayName: 'Spam' } }),
+    envelope(spam, me, { t: 'dm', id: 'd9', name: 'Spam', text: 'engelli mesaj' }),
+  )
+  await w.clock.advance(8000)
+  const text = await list($)
+  expect(text).toContain('Arkadaşlar (0)')
+  expect(text).not.toContain('Gelen istekler')
+  expect(w.notes.length).toBe(0)
+})
+
+test('being unfriended removes the contact and notifies', async ($, on) => {
+  const ali = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ali, 'Ali')] })
+  const me = await start($)
+  w.feed.push(envelope(ali, me, { t: 'unfriend', id: 'u1' }))
+  await w.clock.advance(8000)
+  expect(await list($)).toContain('Arkadaşlar (0)')
+  expect(w.notes).toEqual(['Ali seni arkadaşlıktan çıkardı'])
+})
+
+test('group: invite from a friend, message from a non-friend member, send fans out', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const zeynep = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], profile: { username: '', displayName: 'Deniz' }, profileSent: JSON.stringify({ username: '', displayName: 'Deniz' }) })
+  const me = await start($)
+  const members = [{ id: idOf(ahmet), name: 'Ahmet' }, { id: me, name: 'Deniz' }, { id: idOf(zeynep), name: 'Zeynep' }]
+  w.feed.push(
+    envelope(ahmet, me, { t: 'invite', id: 'i1', g: '0123456789abcdef', title: 'Aile', name: 'Ahmet', members }),
+    envelope(zeynep, me, { t: 'group', id: 'g1', g: '0123456789abcdef', name: 'Zeynep', text: 'grupta selam' }),
+  )
+  await w.clock.advance(8000)
+  expect(await list($)).toContain('Aile · Ahmet, sen, Zeynep')
+
+  const r = await run($, 'buddy-send', 'Aile herkese selam')
+  expect(r.text).toBe('Gönderildi.')
+  expect(opened(sent(w, zeynep)[0], zeynep)?.text).toBe('herkese selam')
+  expect(opened(sent(w, ahmet)[0], ahmet)?.text).toBe('herkese selam')
+
+  const ui = await $.ui.mount(pane('terminal'))
+  await ui.press({ key: 'conv-g:0123456789abcdef' })
+  expect((await ui.find({ type: 'Text', text: /grupta selam/ }))).toBeDefined()
+  await ui.unmount()
+})
+
+test('creating a group invites each picked friend with their own names, not nicknames', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const veli = nacl.box.keyPair()
+  const w = setup(on, {
+    ...V4,
+    contacts: [
+      { ...friend(ahmet, 'Kanka'), profile: { username: 'ahmet', displayName: 'Ahmet Yılmaz' } },
+      friend(veli, 'Veli'),
+    ],
+  })
+  await start($)
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'pick-' + idOf(ahmet) })
+  await ui.press({ key: 'pick-' + idOf(veli) })
+  await ui.input({ key: 'group-title', text: 'Proje' })
+  await ui.unmount()
+
+  const invite = opened(sent(w, veli)[0], veli)
+  expect(invite).toMatchObject({ t: 'invite', title: 'Proje' })
+  expect(invite.members.map((m: { name: string }) => m.name)).toContain('Ahmet Yılmaz')
+  expect(JSON.stringify(invite)).not.toContain('Kanka')
+  expect(sent(w, ahmet).length).toBe(1)
+})
+
+test('send_to_buddy asks first: decline sends nothing, approve sends', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  await start($)
+  const declined = await $.tool.call({ tool: 'mcp__buddy-chat__send_to_buddy', to: 'Ahmet', text: 'gizli dosya' } as never)
+  expect(JSON.stringify(declined)).toContain('onaylamadı')
+  expect(sent(w, ahmet).length).toBe(0)
+  w.answer.value = 'Gönder'
+  await $.tool.call({ tool: 'mcp__buddy-chat__send_to_buddy', to: 'Ahmet', text: 'merhaba' } as never)
+  expect(sent(w, ahmet).length).toBe(1)
+})
+
+test('a second session does not poll while another holds the poller', async ($, on) => {
+  let gets = 0
+  mock.store(on, { ...V4, poller: { session: 'other', at: 1_800_000_000_000 } })
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 's2' }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('tool.register', (_, e) => ({ value: { tool: 'mcp__buddy-chat__' + e.name } }))
+  on('http.fetch', () => { gets++; return { value: { status: 200, ok: true, headers: {}, text: '' } } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(16000)
+  expect(gets).toBe(0)
+  await clock.advance(24000)
+  expect(gets).toBeGreaterThan(0)
+})
+
+test('0.3 data migrates: friends keep their names as nicknames, keys survive', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const sk = b64(nacl.box.keyPair().secretKey)
+  setup(on, { version: 3, lang: 'tr', secretKey: sk, name: 'Deniz', friends: [{ name: 'Kanka', id: idOf(ahmet) }] })
+  const me = await start($)
+  expect(me).toBe(b64(nacl.box.keyPair.fromSecretKey(unb64(sk)).publicKey))
+  const text = await list($)
+  expect(text).toContain('Sen: Deniz')
+  expect(text).toContain('Kanka')
+})
+
+test('0.2 data is cleared except the name, English is the default, and the empty pane draws on both surfaces', async ($, on) => {
+  setup(on, { me: 'a'.repeat(48), friends: [{ name: 'Eski', id: 'b'.repeat(48) }], name: 'Deniz' })
+  const me = await start($)
+  expect(await list($)).toContain('Friends (0)')
+  expect(await list($)).toContain('You: Deniz · ' + me)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect((await run($, 'buddy-id')).text).toContain(me)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount(pane(surface))
+    expect(['welcome', await ui.find({ type: 'Text', text: /Welcome to Buddy chat/ })]).toEqual(['welcome', expect.anything()])
+    await ui.press({ key: 'copy-line' })
+    await ui.press({ key: 'tab-people' })
+    expect(['people', await ui.find({ type: 'Text', text: /Friends/ })]).toEqual(['people', expect.anything()])
+    await ui.press({ key: 'tab-chats' })
+    await ui.unmount()
+  }
+})
+
+function hybridKey(friendKp: KP, meId: string, pq: Uint8Array) {
+  const x = nacl.box.before(unb64(meId), friendKp.secretKey)
+  const label = enc('buddy-chat hybrid v1')
+  const input = new Uint8Array(x.length + pq.length + label.length)
+  input.set(x); input.set(pq, x.length); input.set(label, x.length + pq.length)
+  return nacl.hash(input).slice(0, 32)
+}
+function hybridEnvelope(from: KP, meId: string, pq: Uint8Array, payload: object) {
+  const nonce = nacl.randomBytes(24)
+  const box = nacl.secretbox(enc(JSON.stringify(payload)), nonce, hybridKey(from, meId, pq))
+  return JSON.stringify({ v: 3, from: idOf(from), nonce: b64(nonce), box: b64(box), h: 1 })
+}
+function openHybrid(post: Post | undefined, friendKp: KP, meId: string, pq: Uint8Array) {
+  if (!post) return null
+  const env = JSON.parse(post.body)
+  if (env.h !== 1) return null
+  const plain = nacl.secretbox.open(unb64(env.box), unb64(env.nonce), hybridKey(friendKp, meId, pq))
+  return plain ? JSON.parse(new TextDecoder().decode(plain)) : null
+}
+const payloads = (w: World, kp: KP) => to(w, kp).map(p => opened(p, kp)).filter(Boolean)
+
+for (const order of ['smaller', 'larger'] as const) {
+  test('post-quantum handshake when my id is ' + order + ': hybrid messages both ways, classic is refused', async ($, on) => {
+    const sk = nacl.box.keyPair()
+    const meId = idOf(sk)
+    let friendKp = nacl.box.keyPair()
+    while ((meId < idOf(friendKp)) !== (order === 'smaller')) friendKp = nacl.box.keyPair()
+    const w = setup(on, { ...V4, secretKey: b64(sk.secretKey), contacts: [friend(friendKp, 'Ahmet')] })
+    expect(await start($)).toBe(meId)
+    await w.clock.settle()
+
+    const myKem = payloads(w, friendKp).find(p => p.t === 'kem')?.kem
+    expect(myKem).toBeDefined()
+    let pq: Uint8Array
+    if (order === 'smaller') {
+      const theirs = ml_kem768.keygen()
+      w.feed.push(envelope(friendKp, meId, { t: 'kem', id: 'k1', kem: b64(theirs.publicKey) }))
+      await w.clock.advance(8000)
+      const ct = payloads(w, friendKp).find(p => p.t === 'pq')?.ct
+      pq = ml_kem768.decapsulate(unb64(ct), theirs.secretKey)
+    } else {
+      const encap = ml_kem768.encapsulate(unb64(myKem))
+      pq = encap.sharedSecret
+      w.feed.push(envelope(friendKp, meId, { t: 'pq', id: 'q1', ct: b64(encap.cipherText) }))
+      await w.clock.advance(8000)
+    }
+    expect(await list($)).toContain('kuantuma dayanıklı')
+
+    w.feed.push(
+      hybridEnvelope(friendKp, meId, pq, { t: 'dm', id: 'h1', name: 'A', text: 'kuantum selam' }),
+      envelope(friendKp, meId, { t: 'dm', id: 'c1', name: 'A', text: 'klasik mesaj' }),
+    )
+    await w.clock.advance(8000)
+    const ui = await $.ui.mount(pane('desktop'))
+    expect(await ui.find({ type: 'Text', text: /kuantum selam/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /klasik mesaj/ })).toBeUndefined()
+    await ui.unmount()
+
+    await run($, 'buddy-send', 'Ahmet cevap')
+    const last = to(w, friendKp).at(-1)
+    expect(opened(last, friendKp)).toBeNull()
+    expect(openHybrid(last, friendKp, meId, pq)?.text).toBe('cevap')
+  })
+}
+
+test('desktop opens on the chat list with avatars and previews, terminal goes straight to the thread', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet Yılmaz')] })
+  const me = await start($)
+  w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'p1', name: 'A', text: 'liste önizlemesi' }))
+  await w.clock.advance(8000)
+
+  const desk = await $.ui.mount(pane('desktop'))
+  expect(['step1', await desk.find({ type: 'Svg' })]).toEqual(['step1', expect.anything()])
+  expect(await desk.find({ key: 'back' })).toBeUndefined()
+  expect((await desk.find({ type: 'Text', text: /liste önizlemesi/ }))?.props?.size).toBe('footnote')
+  await desk.press({ key: 'conv-dm:' + idOf(ahmet) })
+  expect(['step2', await desk.find({ key: 'back' })]).toEqual(['step2', expect.anything()])
+  expect(['step3', await desk.find({ type: 'Text', text: /kuantuma|PQ/ })]).toEqual(['step3', expect.anything()])
+  await desk.press({ key: 'back' })
+  expect(await desk.find({ key: 'back' })).toBeUndefined()
+  await desk.unmount()
+
+  const term = await $.ui.mount(pane('terminal'))
+  expect(await term.find({ type: 'Svg' })).toBeUndefined()
+  expect((await term.find({ key: 'tab-chats' }))?.props?.plain).toBe(true)
+  expect(['step4', await term.find({ type: 'Text', text: /liste önizlemesi/ })]).toEqual(['step4', expect.anything()])
+  expect(['step5', await term.find({ key: 'compose-dm:' + idOf(ahmet) })]).toEqual(['step5', expect.anything()])
+  await term.unmount()
+})
+
+test('mobile draws without text fields instead of being refused', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  await start($)
+  const ui = await $.ui.mount({ ...pane('desktop'), surface: 'mobile' } as never)
+  expect(await ui.find({ key: 'tab-chats' })).not.toBeUndefined()
+  await ui.press({ key: 'conv-dm:' + idOf(ahmet) })
+  expect(await ui.find({ type: 'Text', text: /buddy-send/ })).not.toBeUndefined()
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'tab-people' })
+  expect(await ui.find({ type: 'Text', text: /buddy-add/ })).not.toBeUndefined()
+  await ui.unmount()
+})
+
+test('the language switches between English and Turkish, and system lines follow it', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const w = setup(on, { version: 4, contacts: [friend(ahmet, 'Ahmet')] })
+  const me = await start($)
+  w.feed.push(envelope(ahmet, me, { t: 'unfriend', id: 'u7' }))
+  expect((await run($, 'buddy-id')).text).toContain('Your friend runs: /buddy-add ' + me)
+
+  const r = await run($, 'buddy-lang', 'tr')
+  expect(r.text).toBe('Dil: Türkçe')
+  expect((await run($, 'buddy-id')).text).toContain('Arkadaşın şunu yazsın')
+  expect((await run($, 'buddy-lang', 'xx')).text).toContain('/buddy-lang <en|tr>')
+
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-people' })
+  expect(await ui.find({ type: 'Text', text: /Arkadaşlar/ })).not.toBeUndefined()
+  await ui.press({ key: 'lang-en' })
+  expect(await ui.find({ type: 'Text', text: /Friends/ })).not.toBeUndefined()
+  await ui.unmount()
+
+  await run($, 'buddy-lang', 'tr')
+  expect(w.notes).toEqual([])
+  await w.clock.advance(8000)
+  expect(w.notes).toEqual(['Ahmet seni arkadaşlıktan çıkardı'])
+})

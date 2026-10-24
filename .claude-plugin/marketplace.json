@@ -1,0 +1,12 @@
+{
+  "name": "claude-buddy-chat",
+  "description": "buddy-chat: end-to-end encrypted chat between Claude Code users",
+  "owner": { "name": "MrMirhan", "url": "https://github.com/MrMirhan" },
+  "plugins": [
+    {
+      "name": "buddy-chat",
+      "source": "./",
+      "description": "End-to-end encrypted, quantum-resistant chat between Claude Code users: direct messages and groups"
+    }
+  ]
+}

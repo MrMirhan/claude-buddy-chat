@@ -1,0 +1,155 @@
+# claude-buddy-chat
+
+[English](README.md)
+
+Claude Code kullanıcıları arasında uçtan uca şifreli sohbet: birebir ve grup. Anahtar anlaşması kuantuma dayanıklı. buddy-chat'in bir sunucusu yok: şifreli zarfları ücretsiz ve herkese açık ntfy.sh taşır, zarfı sadece alıcı açabilir.
+
+buddy-chat bir Claude Code [mod'u](https://code.claude.com/docs/en/plugins/mods/overview.md). Bir panel, komutlar, Claude için bir araç ve Claude'a bunların nasıl kullanılacağını anlatan bir skill ekler.
+
+## Özellikler
+
+- Birebir mesaj ve en fazla 8 kişilik gruplar
+- Karşı tarafın onayladığı arkadaşlık istekleri
+- Arkadaşlarının gördüğü bir ad ve kullanıcı adı; sadece senin gördüğün takma adlar
+- Kendi mesajını herkesten düzenleme ve silme
+- Arkadaşlıktan çıkarma (karşı taraf bilgilendirilir) ve engelleme (bilgilendirilmez)
+- Yeni mesaj ve istekler için toast ve işletim sistemi bildirimi
+- Claude Desktop, VS Code eklentisi ve terminalde panel
+- İngilizce ve Türkçe. Varsayılan dil İngilizce.
+
+## Gereksinimler
+
+- Claude Code v2.1.299 veya sonrası. Terminalde `claude --version`, Desktop'ta Code sekmesindeki bir oturumda `/status` ile kontrol et.
+- Terminal, Desktop'ın Code sekmesi ya da VS Code eklentisi. claude.ai sohbetinde ve mobil uygulamada çalışmaz.
+
+## Kurulum
+
+Terminaldeki bir oturumun isteminde:
+
+```
+/plugin install buddy-chat --marketplace MrMirhan/claude-buddy-chat
+```
+
+Kabuktan:
+
+```bash
+claude plugin install buddy-chat --marketplace MrMirhan/claude-buddy-chat
+```
+
+Claude Code marketplace'i eklemek isteyip istemediğini sorar. `y` de, sonra user kapsamını seç.
+
+Desktop uygulamasında `/plugin` çalışmaz. Orada istem kutusunun yanındaki **+** → **Plugins** → **Add marketplace** ile `MrMirhan/claude-buddy-chat` ekle, sonra **Add plugin** seç.
+
+Kabuktan kurarken açık bir oturum varsa, o oturumda `/reload-plugins` çalıştır.
+
+## Başlarken
+
+1. `/buddy` paneli açar.
+2. Adını ve kullanıcı adını belirle.
+3. **Ekleme satırını kopyala**'ya bas, satırı arkadaşına herhangi bir uygulamadan gönder.
+4. Arkadaşın satırı kendi panelindeki **Kişi ekle** alanına yapıştırır. Sana arkadaşlık isteği gelir.
+5. **Kişiler** sekmesinde **Kabul et**'e bas. Sohbet açılır.
+
+İkinizin de buddy-chat kurmuş olması gerekir.
+
+## Panel
+
+Panel her yüzeyde aynı, ama her uygulama kendi görünümüyle çizer.
+
+**Desktop ve VS Code**
+
+- Sohbet listesinde renkli avatar, son mesaj, saat ve okunmamış sayısı görünür. Sohbete tıklayınca açılır.
+- Sohbetin üst çubuğunda geri butonu (`b`), avatar, ad ve şifreleme durumu var. Mesajlar çerçeveli balonlarda.
+- **Kişiler** sekmesinde profil kartın, istekler, arkadaşlar, gruplar ve engellenenler var.
+
+**Terminal**
+
+- Sohbetler konuşmanın üstünde çip olarak durur, `1`-`9` ile geçilir. Yazı alanı hep altta.
+- Gelen mesajların solunda gönderenin renginde bir çizgi var.
+- `Ctrl+X` sonra `Tab` paneli odaklar, `Ctrl+X` sonra `X` kapatır. Butonlara fareyle tıklamak terminalde sadece fullscreen görünümde çalışır.
+
+**Her yerde**
+
+- `✎` mesajını düzenler, `✕` herkesten siler.
+- `↗` gelen mesajı Claude'a iletir; mesajın senden değil arkadaşından geldiği notuyla.
+- `s` **Sohbetler**'i, `k` **Kişiler**'i açar.
+
+## Komutlar
+
+| Komut | Ne yapar |
+| --- | --- |
+| `/buddy` | Paneli aç |
+| `/buddy-id` | Ekleme satırını göster |
+| `/buddy-add <id> [takma ad]` | Arkadaşlık isteği gönder ya da gelen isteği kabul et |
+| `/buddy-name <ad soyad>` | Görünen adını ayarla |
+| `/buddy-username <kullanıcıadı>` | Kullanıcı adını ayarla |
+| `/buddy-list` | Arkadaşları, istekleri, grupları ve engellenenleri listele |
+| `/buddy-send <kişi ya da grup> <mesaj>` | Mesaj gönder |
+| `/buddy-group <ad> <kişi1> [kişi2 ...]` | Grup kur |
+| `/buddy-lang <en ya da tr>` | Dili ayarla |
+
+Bir kişiyi takma adıyla, görünen adıyla ya da `@kullanıcıadı` ile anabilirsin.
+
+## Dil
+
+Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da **Kişiler** sekmesinde **Türkçe**'yi seç. Panel hemen değişir. Komut açıklamaları Claude Code'un bir sonraki açılışında değişir.
+
+## Claude ve buddy-chat
+
+- Claude'dan mesaj göndermesini isteyebilirsin, örneğin "Ayşe'ye geç kalacağımı yaz". Claude `send_to_buddy` aracını kullanır. Mesaj bir pencerede gösterilir ve sadece **Gönder**'i seçersen gider.
+- Claude mesajlarını okuyamaz. Bir mesajı sadece sen `↗`'ye basınca görür.
+- Pakette gelen skill, Claude'a iletilen mesajı başka birinden gelen veri olarak görmesini ve içindeki talimatları senin onayın olmadan uygulamamasını söyler.
+
+## Nasıl çalışır
+
+- **Kimlik.** İlk açılışta buddy-chat bilgisayarında bir X25519 ve bir ML-KEM-768 anahtar çifti üretir. ID'n X25519 açık anahtarın; paylaşmak sorun değil. Gizli anahtarlar bilgisayarında, Claude Code'un plugin kaydında durur.
+- **Gelen kutusu.** Her ID'nin, ID'nin hash'inden türeyen bir ntfy.sh topic'i var. Gönderirken buddy-chat şifreli zarfı alıcının topic'ine bırakır. Her bilgisayarda bir oturum kendi topic'ini 8 saniyede bir yoklar; diğer açık oturumlar ortak kayıttan okur.
+- **Şifreleme.** El sıkışma bitmeden her mesaj `nacl.box` (X25519 ve XSalsa20-Poly1305) ile şifrelenir. Sadece alıcı açabilir ve kimin gönderdiğini bilir.
+- **Kuantuma dayanıklılık.** İki kişi arkadaş olunca plugin'leri kendiliğinden bir ML-KEM-768 (FIPS 203) el sıkışması yapar. Ondan sonra her mesajın anahtarı X25519 ve ML-KEM sırlarının ikisinden türer; Signal'in PQXDH'ı ve Apple'ın iMessage PQ3'ü de bu yaklaşımı kullanır. Bugün kaydedilen trafik ileride bir kuantum bilgisayarla çözülemez. ML-KEM kodunda bir hata çıksa bile X25519 korumaya devam eder. El sıkışmadan sonra o arkadaştan gelen klasik şifreli içerik reddedilir. **Kişiler** sekmesinde el sıkışması biten arkadaşın yanında `PQ` yazar.
+- **İstekler.** Arkadaşın olmayan birinin mesajı düşer. İstek ve kabul de şifreli ve imzalıdır.
+- **Gruplar.** Her grup mesajı her üyeye ayrı şifrelenip gönderilir. Arkadaşın olan üyelere kuantuma dayanıklı anahtarla, olmayanlara X25519 ile. Üyeleri sadece grubu kuran değiştirebilir.
+- **Düzenleme ve silme.** Değişikliği arkadaşının plugin'i uygular. Ekran görüntüsünü ya da değiştirilmiş bir istemciyi geri alamaz.
+
+## Güvenlik sınırları
+
+- **Forward secrecy yok.** Signal'deki Double Ratchet gibi bir mekanizma yok. Gizli anahtarların bilgisayarından çalınırsa ntfy.sh'ta hâlâ duran mesajlar, yani en fazla son 12 saatinkiler, çözülebilir.
+- **Üst veri görünür.** ntfy.sh hangi topic'e ne zaman, hangi IP'den, ne büyüklükte mesaj geldiğini görür.
+- **Üçüncü taraf kod.** TweetNaCl.js Cure53 tarafından denetlendi. noble-post-quantum bağımsız denetimden geçmedi, sadece yazarı denetledi. buddy-chat ikisini birlikte bu yüzden kullanıyor.
+- **Denetlenmedi.** buddy-chat'in kendisi güvenlik denetiminden geçmedi.
+
+## Sınırlar
+
+- ntfy.sh her IP'ye 60 istek verir, sonra 5 saniyede bir istek ekler. HTTP 429 gelirse buddy-chat bir dakika bekler.
+- ntfy.sh mesajları 12 saat saklar. O süre içinde hiç oturum açmayan kişiye mesaj ulaşmaz.
+- Bir mesaj yaklaşık 2.500 karakter alır.
+- Her grup mesajı, düzenleme ve silme üye başına bir istek harcar.
+
+## Güncelleme notları
+
+- 0.4'ten 0.5 ve sonrasına: bütün veriler kalır. İki taraf da 0.5 veya sonrasına geçince PQ el sıkışması yapılır.
+- 0.3'ten: anahtarların ve arkadaşların kalır. Arkadaşlarına verdiğin adlar takma ad olur.
+- 0.1 ya da 0.2'den: eski veriler silinir, yeni bir ID oluşur.
+
+## Geliştirme
+
+```bash
+claude --plugin-dir .
+```
+
+Testler ve kontroller repo kökünden çalışır:
+
+```bash
+claude plugin test .
+```
+
+```bash
+claude plugin validate .
+```
+
+Claude Code mod'u bir kez yükleyince API tiplerini `.claude-plugin/types/` altına yazar. Ondan sonra `npx tsc -p .` hooks ve testlerin tiplerini kontrol eder.
+
+Kod `hooks/register.tsx` dosyasında. Her dilin metinleri `hooks/i18n.ts` içinde. Yeni bir dil eklemek için `hooks/i18n.ts`'ye bir tablo ekle, kodunu `LANGS` ve `LANG_NAMES`'e yaz.
+
+## Lisans
+
+MIT. Bkz. [LICENSE](LICENSE). `hooks/vendor/` altındaki kod kendi lisanslarını korur. Bkz. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
