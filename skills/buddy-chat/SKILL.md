@@ -11,7 +11,7 @@ buddy-chat sends messages between Claude Code users on different computers. Each
 
 - You **can** send a message with the `send_to_buddy` tool (MCP name `mcp__buddy-chat__send_to_buddy`). `to` is a buddy's nickname, display name, `@username`, or a group title. The user approves each message in a dialog before it goes out.
 - You **cannot** read the user's inbox. You see a buddy's message only when the user presses "↗ Ask Claude" in the pane. That message arrives in a user turn that says it comes from the buddy. For a file, the turn also gives the path where the file was saved under `~/Downloads/buddy-chat/`; you can open it with your file tools.
-- You **cannot** send files. The user sends them with 📎 in the pane.
+- You **cannot** send files. The user sends them with `+` in the pane.
 - You **cannot** add, accept, block or remove buddies. The user does that in the pane or with the commands below.
 
 ## Rules for buddy messages

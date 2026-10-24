@@ -1171,7 +1171,7 @@ const sizeText = (n: number) => (n < 1024 * 1024 ? Math.max(1, Math.round(n / 10
 const RUNNABLE = new Set(['app', 'command', 'sh', 'bash', 'zsh', 'pkg', 'mpkg', 'dmg', 'exe', 'msi', 'bat', 'cmd', 'ps1', 'vbs', 'js',
   'jar', 'scpt', 'applescript', 'workflow', 'terminal', 'py', 'rb', 'pl', 'php', 'deb', 'rpm', 'appimage', 'run', 'bin', 'lnk', 'url', 'webloc'])
 const isRunnable = (name: string) => RUNNABLE.has(name.split('.').pop()?.toLowerCase() ?? '')
-const fileIcon = (mime: string) => (mime.startsWith('image/') ? '🖼' : mime.startsWith('video/') ? '🎬' : mime.startsWith('audio/') ? '🎵' : '📎')
+const fileIcon = (mime: string) => (mime.startsWith('image/') ? '▧' : mime.startsWith('video/') ? '▶\uFE0E' : mime.startsWith('audio/') ? '♫' : '▤')
 
 function cleanFile(value: unknown): FileRef | undefined {
   const f = value as Partial<FileRef> | null
@@ -3007,7 +3007,7 @@ export const register: Register = on => {
                 <Client key={'conv-' + c.id} module="./chat-row.tsx" flexGrow={1}
                   props={{
                     conv: c.id,
-                    title: (c.isGroup ? '# ' : '') + c.title + (muted.includes(c.id) ? ' 🔕' : ''),
+                    title: (c.isGroup ? '# ' : '') + c.title + (muted.includes(c.id) ? ' ⊘' : ''),
                     preview: isTyping(c.id) ? t('typingNow') : previewOf(last),
                     when: last ? shortWhen(last.at, now) : '',
                     unread: c.unread,
@@ -3019,7 +3019,7 @@ export const register: Register = on => {
           <Box flexDirection="column" flexGrow={1} flexShrink={1}>
             <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
               <Button key={'conv-' + c.id} plain onPress={() => select($, c.id)}>
-                <Text weight="semibold">{(c.isGroup ? '# ' : '') + c.title + (muted.includes(c.id) ? ' 🔕' : '')}</Text>
+                <Text weight="semibold">{(c.isGroup ? '# ' : '') + c.title + (muted.includes(c.id) ? ' ⊘' : '')}</Text>
               </Button>
               <Text dimColor={c.unread === 0} color={c.unread > 0 ? ACCENT : undefined} size="caption">{last ? shortWhen(last.at, now) : ''}</Text>
             </Box>
@@ -3160,7 +3160,7 @@ export const register: Register = on => {
     )
     const isMuted = muted.includes(current.id)
     const muteButton = (
-      <Button key="mute" label={graphic ? (isMuted ? '🔕' : '🔔') : (isMuted ? t('unmute') : t('mute'))} plain dimColor={!isMuted}
+      <Button key="mute" label={isMuted ? t('unmute') : t('mute')} plain dimColor={!isMuted}
         hotkey="m" onPress={() => toggleMute($, current.id)} />
     )
     const securityLine = group
@@ -3342,7 +3342,7 @@ export const register: Register = on => {
     })
 
     const attachButton = Input && !editTarget && (
-      <Button key="attach" label="📎" plain={graphic ? undefined : true} hotkey={graphic ? undefined : 'a'}
+      <Button key="attach" label="+" plain={graphic ? undefined : true} hotkey={graphic ? undefined : 'a'}
         onPress={async () => {
           const r = await attachFile($, current.id)
           if (r.text && !r.ok) toast(r.text)
@@ -3431,7 +3431,7 @@ export const register: Register = on => {
                 <Text size="heading" weight="semibold" wrap="truncate-end">{(current.isGroup ? '# ' : '') + current.title}</Text>
                 {isTyping(current.id)
                   ? <Text color={ACCENT} size="caption" italic>{t('typingNow')}</Text>
-                  : <Text dimColor size="caption" wrap="truncate-end">{'🔒 ' + (group ? group.members.map(m => nameOf(m.id, m.name)).join(', ') : peer ? subtitle(peer) : '')}</Text>}
+                  : <Text dimColor size="caption" wrap="truncate-end">{group ? group.members.map(m => nameOf(m.id, m.name)).join(', ') : peer ? subtitle(peer) : ''}</Text>}
               </Box>
               {muteButton}
               {statusView}
@@ -3442,7 +3442,7 @@ export const register: Register = on => {
                 <Box flexDirection="column" alignItems="center" justifyContent="center" rowGap={1} flexGrow={1}>
                   {avatar('empty-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 72)}
                   <Text size="title" weight="semibold">{(current.isGroup ? '# ' : '') + current.title}</Text>
-                  <Text dimColor size="caption">{'🔒 ' + securityLine}</Text>
+                  <Text dimColor size="caption">{securityLine}</Text>
                   <Text dimColor>{t('sayHi')}</Text>
                 </Box>
               )
@@ -3472,7 +3472,7 @@ export const register: Register = on => {
           {convs.map((c, i) => (
             <Button key={'conv-' + c.id} plain hotkey={i < 9 ? String(i + 1) : undefined} dimColor={c.id !== current.id}
               onPress={() => select($, c.id)}>
-              {(c.isGroup ? '# ' : '') + c.title + (muted.includes(c.id) ? ' 🔕' : '')}{c.unread ? <Text color="warning"> ●{c.unread}</Text> : ''}
+              {(c.isGroup ? '# ' : '') + c.title + (muted.includes(c.id) ? ' ⊘' : '')}{c.unread ? <Text color="warning"> ●{c.unread}</Text> : ''}
             </Button>
           ))}
         </Box>

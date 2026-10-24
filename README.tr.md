@@ -88,8 +88,8 @@ Panelin üç görünümü var. **Sohbetler** konuşmalarını listeler ve açar.
 - Geniş panelde sohbet listesi ana sayfanın yanında durur. Listede renkli avatar, son mesaj, saat ve okunmamış sayısı görünür. 5'ten fazla sohbet varsa bir arama alanı listeyi süzer. **Kişiler** ve **Ayarlar** listenin altında.
 - Açık sohbette başlık üstte, yazı alanı altta sabit kalır; mesajlar ikisinin arasında kayar. Fare tekerleği ya da trackpad ile kaydır, ya da **eski mesajlar** ve **yeni mesajlar**'ı seç. Claude Code deposundaki en eski mesajın da ötesine geçince daha eski mesajlar geçmiş dosyalarından geri gelir. `←` listeye döner.
 - Senin mesajların sağda turuncu balonlarda, durumlarıyla birlikte: ◷ gönderiliyor, ✓ gönderildi, ✓✓ iletildi, mavi ✓✓ okundu. Gelenler solda gri balonlarda. Bir mesajın üzerine gelince işlemleri altındaki satırda görünür.
-- 📎 ile 3 MB'a kadar dosya gönderirsin. Dosya, adı ve boyutuyla bir kart olarak görünür; **Aç** düğmesi ve ses dosyalarında ▶ vardır. `➤` yazıyı gönderir.
-- Başlıktaki 🔔 sohbeti sessize alır ya da sesini açar. Arkadaşın yazarken adının altında "yazıyor…" görünür.
+- `+` ile 3 MB'a kadar dosya gönderirsin. Dosya, adı ve boyutuyla bir kart olarak görünür; **Aç** düğmesi ve ses dosyalarında ▶ vardır. `➤` yazıyı gönderir.
+- Başlıktaki **Sessize al** sohbeti sessize alır ya da sesini açar. Arkadaşın yazarken adının altında "yazıyor…" görünür.
 
 **Terminal**
 

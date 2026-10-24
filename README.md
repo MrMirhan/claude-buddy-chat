@@ -88,8 +88,8 @@ The pane has three views. **Chats** lists your conversations and opens one. **Pe
 - A wide pane shows the chat list beside your home view. The list shows a colored avatar, the last message, the time and the number of unread messages. With more than 5 chats, a search field filters the list. **People** and **Settings** are at the bottom of the list.
 - An open chat keeps its header at the top and the text field at the bottom, and the messages move between them. Scroll with the mouse wheel or the trackpad, or select **older messages** and **newer messages**. Past the oldest message in Claude Code's store, older messages come back from the history files. Select `←` to go back to the list.
 - Your messages show in orange bubbles on the right, with their state: ◷ sending, ✓ sent, ✓✓ delivered, blue ✓✓ read. Incoming messages show in grey bubbles on the left. Move the pointer over a message to show its actions in the row under it.
-- Select 📎 to send a file of up to 3 MB. A file shows as a card with its name and size, **Open** and, for audio, ▶. `➤` sends the text.
-- 🔔 in the header mutes or unmutes the chat. "typing…" shows under the name while your friend types.
+- Select `+` to send a file of up to 3 MB. A file shows as a card with its name and size, **Open** and, for audio, ▶. `➤` sends the text.
+- **Mute** in the header mutes or unmutes the chat. "typing…" shows under the name while your friend types.
 
 **Terminal**
 
