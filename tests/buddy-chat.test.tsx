@@ -5,7 +5,7 @@ import { ml_kem768 } from '../hooks/vendor/mlkem.js'
 
 type KP = { publicKey: Uint8Array; secretKey: Uint8Array }
 type Post = { url: string; body: string }
-type World = { feed: string[]; posts: Post[]; notes: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
+type World = { feed: string[]; posts: Post[]; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
 
 const enc = (s: string) => new TextEncoder().encode(s)
 const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
@@ -36,7 +36,7 @@ const to = (w: World, kp: KP) => w.posts.filter(p => p.url === topicOf(idOf(kp))
 const sent = (w: World, kp: KP) => to(w, kp).filter(p => !['kem', 'pq'].includes(opened(p, kp)?.t))
 
 function setup(on: On, store: Record<string, unknown>, sessionId = 's1'): World {
-  const w: World = { feed: [], posts: [], notes: [], answer: { value: 'Gönderme' }, clock: undefined as never }
+  const w: World = { feed: [], posts: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
   mock.store(on, store)
   w.clock = mock.clock(on, { now: 1_800_000_000_000 })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -45,7 +45,7 @@ function setup(on: On, store: Record<string, unknown>, sessionId = 's1'): World 
   on('tool.register', (_, e) => ({ value: { tool: 'mcp__buddy-chat__' + e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.copy', () => ({ value: { isCopied: true } }))
-  on('ui.toast', () => ({ value: undefined }) as never)
+  on('ui.toast', (_, e) => { w.toasts.push(String((e as { text?: string }).text ?? '')); return { value: undefined } as never })
   on('ui.notify', (_, e) => { w.notes.push(String((e as { text?: string }).text ?? JSON.stringify(e))); return { value: { isSent: true, channel: 'terminal' } } as never })
   on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
     const q = (e as unknown as { questions: { question: string }[] }).questions[0]?.question ?? ''
@@ -531,5 +531,32 @@ test('a wide desktop pane: list beside home, a chat opens beside the list, sendi
   await ui.press({ key: 'back' })
   expect(await ui.find({ type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^1$/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a new session does not toast what is already stored; a new message toasts once', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const old = { key: 'o1', conv: 'dm:' + idOf(ahmet), from: idOf(ahmet), name: 'A', text: 'eski mesaj', at: 1, mine: false }
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox: [old] })
+  const toasts = w.toasts
+  const me = await start($)
+  await w.clock.advance(8000)
+  expect(toasts).toEqual([])
+
+  w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'n1', name: 'A', text: 'yeni mesaj' }))
+  await w.clock.advance(8000)
+  await w.clock.advance(8000)
+  expect(toasts).toEqual(['Ahmet: yeni mesaj'])
+})
+
+test('terminal: the text field does not grab the focus, and a write button with hotkey i is there', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  await start($)
+  const ui = await $.ui.mount(pane('terminal'))
+  const field = await ui.find({ key: 'compose-dm:' + idOf(ahmet) })
+  expect(field?.props?.autoFocus).toBeUndefined()
+  expect((await ui.find({ key: 'write' }))?.props?.hotkey).toBe('i')
+  await ui.press({ key: 'write' })
   await ui.unmount()
 })

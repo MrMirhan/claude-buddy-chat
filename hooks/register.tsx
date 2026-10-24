@@ -96,6 +96,8 @@ let composeSeq = 0
 let addSeq = 0
 let groupSeq = 0
 let pollerAt = 0
+
+const composeKey = (conv: string) => 'compose-' + conv + (composeSeq ? '-' + composeSeq : '')
 let lineCopied = false
 let editing = ''
 let session = ''
@@ -425,7 +427,8 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
   }
 }
 
-async function refresh($: EngineInterface) {
+// quiet: on session start, what is already stored counts as seen, so a new session does not toast old messages.
+async function refresh($: EngineInterface, quiet = false) {
   const savedLang = await $.store.get('lang')
   lang = isLang(savedLang) ? savedLang : 'en'
   profile = cleanProfile(await $.store.get('profile'))
@@ -442,19 +445,19 @@ async function refresh($: EngineInterface) {
   for (const m of inbox) {
     if (shown.has(m.key)) continue
     shown.add(m.key)
-    if (m.mine || m.deleted) continue
+    if (quiet || m.mine || m.deleted) continue
     const group = groups.find(g => groupConv(g.id) === m.conv)
     $.ui.toast((group ? group.title + ' · ' : '') + (m.system ? textOf(m) : nameOf(m.from, m.name) + ': ' + m.text).slice(0, 90))
   }
   for (const c of contacts) {
     if (c.state !== 'incoming' || shown.has('req:' + c.id)) continue
     shown.add('req:' + c.id)
-    $.ui.toast(t('notifyWantsToAdd', { name: ownName(c.profile) || shortId(c.id) }))
+    if (!quiet) $.ui.toast(t('notifyWantsToAdd', { name: ownName(c.profile) || shortId(c.id) }))
   }
   for (const n of asArray<Notice>(await $.store.get('notices'))) {
     if (shown.has('notice:' + n.key)) continue
     shown.add('notice:' + n.key)
-    if (n.sys && isKey(n.sys.key)) $.ui.toast(t(n.sys.key, n.sys.vars))
+    if (!quiet && n.sys && isKey(n.sys.key)) $.ui.toast(t(n.sys.key, n.sys.vars))
   }
 
   const next = JSON.stringify([
@@ -941,10 +944,7 @@ export const register: Register = on => {
     filter = ''
     await migrate($)
     await loadIdentity($)
-    await refresh($)
-    for (const m of inbox) shown.add(m.key)
-    for (const c of contacts) if (c.state === 'incoming') shown.add('req:' + c.id)
-    for (const n of asArray<Notice>(await $.store.get('notices'))) shown.add('notice:' + n.key)
+    await refresh($, true)
     void broadcastProfile($).catch(() => {})
     // Handshake with friends who have no quantum-resistant key yet, such as those updated from 0.4.
     void (async () => { for (const f of friends()) if (!f.pq) await sendKem($, f.id) })().catch(() => {})
@@ -1627,15 +1627,18 @@ export const register: Register = on => {
             <Button key="edit-cancel" label={t('stopEditing')} plain dimColor onPress={() => { editing = ''; redraw() }} />
           </Box>
         )
-        : <Input key={'compose-' + current.id + (composeSeq ? '-' + composeSeq : '')}
+        : <Input key={composeKey(current.id)}
             label={graphic ? undefined : '→ ' + (current.isGroup ? '# ' : '') + current.title}
-            placeholder={t('composePlaceholder', { title: (current.isGroup ? '# ' : '') + current.title })} value="" submitLabel={t('send')} autoFocus
+            placeholder={t('composePlaceholder', { title: (current.isGroup ? '# ' : '') + current.title })} value="" submitLabel={t('send')}
+            autoFocus={graphic ? true : undefined}
             onSubmit={async (value: string) => {
               const r = await sendText($, current.id, value)
               if (!r.ok) toast(r.text)
               if (r.sent) {
                 composeSeq++
                 redraw()
+                // The fresh field replaces the old one, so the focus moves to it and the user keeps typing.
+                void $.ui.focus({ requestId: PANE, key: composeKey(current.id) }).catch(() => {})
               }
             }} />
 
@@ -1691,8 +1694,15 @@ export const register: Register = on => {
         {thread.length === 0 && <Box marginY={1}><Text dimColor>{t('emptyThread')}</Text></Box>}
         <Box flexDirection="column">{rowsView}</Box>
         {rule}
-        {composer}
+        <Box flexDirection="row" columnGap={1}>
+          <Box flexGrow={1} flexShrink={1}>{composer}</Box>
+          {Input && !editTarget && (
+            <Button key="write" label={t('writeButton')} plain hotkey="i"
+              onPress={() => { void $.ui.focus({ requestId: PANE, key: composeKey(current.id) }).catch(() => {}) }} />
+          )}
+        </Box>
         <Text dimColor wrap="truncate-end">{t('terminalHint')}</Text>
+        <Text dimColor wrap="truncate-end">{t('terminalHint2')}</Text>
       </Box>
     )
   })
