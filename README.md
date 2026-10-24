@@ -11,7 +11,10 @@ buddy-chat is a Claude Code [mod](https://code.claude.com/docs/en/plugins/mods/o
 - Direct messages and groups of up to 8 people
 - Friend requests that the other person accepts
 - A display name and a username that your friends see, and nicknames that only you see
-- Edit and delete your own messages for everyone
+- Edit and delete your own messages for everyone, and copy any message
+- Message states: sending ◷, sent ✓, delivered ✓✓ and read (blue ✓✓)
+- A typing indicator in direct chats
+- Privacy switches for read receipts and the typing indicator. With read receipts off, you send none and see none.
 - Remove a friend (they are told) or block someone (they are not told)
 - Toasts and operating system notifications for new messages and requests
 - A pane in the Claude Code Desktop app, the VS Code extension and the terminal
@@ -122,12 +125,13 @@ English is the default. To use Turkish, run `/buddy-lang tr`, or select **Türk�
 ## How it works
 
 - **Identity.** On first start, buddy-chat makes an X25519 key pair and an ML-KEM-768 key pair on your machine. Your ID is your X25519 public key. You can share it. The secret keys stay in Claude Code's plugin store on your machine.
-- **Inbox.** Each ID has an ntfy.sh topic that comes from a hash of the ID. To send, buddy-chat posts a sealed message to the recipient's topic. One session on each machine polls its own topic every 8 seconds. Other open sessions read the shared store.
+- **Inbox.** Each ID has an ntfy.sh topic that comes from a hash of the ID. To send, buddy-chat posts a sealed message to the recipient's topic. One session on each machine receives for the machine. It keeps one request to its topic open with `curl`, so ntfy.sh pushes each message as soon as it arrives. If `curl` is not available, that session polls the topic every 8 seconds. Other open sessions read the shared store.
 - **Encryption.** Before the handshake is complete, each message is sealed with `nacl.box` (X25519 and XSalsa20-Poly1305). Only the recipient can open it, and the recipient knows who sent it.
 - **Quantum resistance.** After two people become friends, their plugins run an ML-KEM-768 (FIPS 203) handshake on their own. After that, each message key comes from both the X25519 secret and the ML-KEM secret, as in Signal's PQXDH and Apple's iMessage PQ3. Traffic that someone records today stays protected from a future quantum computer. If the ML-KEM code has a bug, X25519 still protects the message. After the handshake, buddy-chat refuses classic-sealed content from that friend. The **People** tab shows `PQ` beside each friend whose handshake is complete.
 - **Requests.** buddy-chat drops messages from people who are not your friends. Requests and replies are also sealed and authenticated.
 - **Groups.** Each group message is sealed for each member and sent to each member. Members who are your friends get the quantum-resistant key. Other members get X25519. Only the person who created the group can change its members.
 - **Edit and delete.** Your friend's plugin applies the change. It cannot undo a screenshot or a changed client.
+- **Receipts and typing.** Delivered and read receipts and the typing signal are sealed messages too. A receipt counts only when it comes from a person the message went to.
 
 ## Security limits
 
@@ -142,6 +146,8 @@ English is the default. To use Turkish, run `/buddy-lang tr`, or select **Türk�
 - ntfy.sh keeps messages for 12 hours. A message to someone who opens no session in that time is lost.
 - One message holds about 2,500 characters.
 - Each group message, edit and delete uses one request for each member.
+- Receipts and typing signals also use requests. buddy-chat sends one receipt for each batch of messages and one typing signal every 5 seconds at most. Groups have no typing indicator.
+- A delivered receipt goes out only while the recipient has Claude Code open.
 
 ## Update notes
 

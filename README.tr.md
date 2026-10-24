@@ -11,7 +11,10 @@ buddy-chat bir Claude Code [mod'u](https://code.claude.com/docs/en/plugins/mods/
 - Birebir mesaj ve en fazla 8 kişilik gruplar
 - Karşı tarafın onayladığı arkadaşlık istekleri
 - Arkadaşlarının gördüğü bir ad ve kullanıcı adı; sadece senin gördüğün takma adlar
-- Kendi mesajını herkesten düzenleme ve silme
+- Kendi mesajını herkesten düzenleme ve silme; her mesajı kopyalama
+- Mesaj durumları: gönderiliyor ◷, gönderildi ✓, iletildi ✓✓, okundu (mavi ✓✓)
+- Birebir sohbetlerde "yazıyor…" göstergesi
+- Okundu bilgisi ve yazıyor göstergesi için gizlilik ayarları. Okundu bilgisi kapalıyken ne gönderirsin ne görürsün.
 - Arkadaşlıktan çıkarma (karşı taraf bilgilendirilir) ve engelleme (bilgilendirilmez)
 - Yeni mesaj ve istekler için toast ve işletim sistemi bildirimi
 - Claude Desktop, VS Code eklentisi ve terminalde panel
@@ -122,12 +125,13 @@ Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da *
 ## Nasıl çalışır
 
 - **Kimlik.** İlk açılışta buddy-chat bilgisayarında bir X25519 ve bir ML-KEM-768 anahtar çifti üretir. ID'n X25519 açık anahtarın; paylaşmak sorun değil. Gizli anahtarlar bilgisayarında, Claude Code'un plugin kaydında durur.
-- **Gelen kutusu.** Her ID'nin, ID'nin hash'inden türeyen bir ntfy.sh topic'i var. Gönderirken buddy-chat şifreli zarfı alıcının topic'ine bırakır. Her bilgisayarda bir oturum kendi topic'ini 8 saniyede bir yoklar; diğer açık oturumlar ortak kayıttan okur.
+- **Gelen kutusu.** Her ID'nin, ID'nin hash'inden türeyen bir ntfy.sh topic'i var. Gönderirken buddy-chat şifreli zarfı alıcının topic'ine bırakır. Her bilgisayarda bir oturum o bilgisayar adına mesaj alır. Bu oturum `curl` ile topic'e açık bir bağlantı tutar; ntfy.sh her mesajı geldiği anda iletir. `curl` yoksa topic'i 8 saniyede bir yoklar. Diğer açık oturumlar ortak kayıttan okur.
 - **Şifreleme.** El sıkışma bitmeden her mesaj `nacl.box` (X25519 ve XSalsa20-Poly1305) ile şifrelenir. Sadece alıcı açabilir ve kimin gönderdiğini bilir.
 - **Kuantuma dayanıklılık.** İki kişi arkadaş olunca plugin'leri kendiliğinden bir ML-KEM-768 (FIPS 203) el sıkışması yapar. Ondan sonra her mesajın anahtarı X25519 ve ML-KEM sırlarının ikisinden türer; Signal'in PQXDH'ı ve Apple'ın iMessage PQ3'ü de bu yaklaşımı kullanır. Bugün kaydedilen trafik ileride bir kuantum bilgisayarla çözülemez. ML-KEM kodunda bir hata çıksa bile X25519 korumaya devam eder. El sıkışmadan sonra o arkadaştan gelen klasik şifreli içerik reddedilir. **Kişiler** sekmesinde el sıkışması biten arkadaşın yanında `PQ` yazar.
 - **İstekler.** Arkadaşın olmayan birinin mesajı düşer. İstek ve kabul de şifreli ve imzalıdır.
 - **Gruplar.** Her grup mesajı her üyeye ayrı şifrelenip gönderilir. Arkadaşın olan üyelere kuantuma dayanıklı anahtarla, olmayanlara X25519 ile. Üyeleri sadece grubu kuran değiştirebilir.
 - **Düzenleme ve silme.** Değişikliği arkadaşının plugin'i uygular. Ekran görüntüsünü ya da değiştirilmiş bir istemciyi geri alamaz.
+- **Okundu bilgisi ve yazıyor.** İletildi ve okundu bilgileri ile yazıyor sinyali de şifreli mesajdır. Bir bilgi, sadece mesajın gittiği kişiden geldiyse sayılır.
 
 ## Güvenlik sınırları
 
@@ -142,6 +146,8 @@ Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da *
 - ntfy.sh mesajları 12 saat saklar. O süre içinde hiç oturum açmayan kişiye mesaj ulaşmaz.
 - Bir mesaj yaklaşık 2.500 karakter alır.
 - Her grup mesajı, düzenleme ve silme üye başına bir istek harcar.
+- Okundu bilgileri ve yazıyor sinyali de istek harcar. buddy-chat her mesaj grubu için tek bir bilgi, en fazla 5 saniyede bir yazıyor sinyali gönderir. Gruplarda yazıyor göstergesi yok.
+- İletildi bilgisi, alıcıda Claude Code açıkken gider.
 
 ## Güncelleme notları
 

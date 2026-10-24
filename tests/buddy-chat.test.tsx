@@ -5,7 +5,7 @@ import { ml_kem768 } from '../hooks/vendor/mlkem.js'
 
 type KP = { publicKey: Uint8Array; secretKey: Uint8Array }
 type Post = { url: string; body: string }
-type World = { feed: string[]; posts: Post[]; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
+type World = { feed: string[]; posts: Post[]; gets: number; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
 
 const enc = (s: string) => new TextEncoder().encode(s)
 const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
@@ -33,10 +33,11 @@ function opened(post: Post | undefined, kp: KP) {
   return plain ? JSON.parse(new TextDecoder().decode(plain)) : null
 }
 const to = (w: World, kp: KP) => w.posts.filter(p => p.url === topicOf(idOf(kp)))
-const sent = (w: World, kp: KP) => to(w, kp).filter(p => !['kem', 'pq'].includes(opened(p, kp)?.t))
+const sent = (w: World, kp: KP) => to(w, kp).filter(p => !['kem', 'pq', 'receipt', 'typing'].includes(opened(p, kp)?.t))
 
-function setup(on: On, store: Record<string, unknown>, sessionId = 's1'): World {
-  const w: World = { feed: [], posts: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
+// spawn stands in for curl; without one the stream cannot start and the poller carries the test.
+function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?: (e: { argv: string[] }) => AsyncGenerator<object>): World {
+  const w: World = { feed: [], posts: [], gets: 0, notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
   mock.store(on, store)
   w.clock = mock.clock(on, { now: 1_800_000_000_000 })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -45,6 +46,10 @@ function setup(on: On, store: Record<string, unknown>, sessionId = 's1'): World 
   on('tool.register', (_, e) => ({ value: { tool: 'mcp__buddy-chat__' + e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.copy', () => ({ value: { isCopied: true } }))
+  on('process.spawn', async function* (_: unknown, e: { argv: string[] }) {
+    if (!spawn) throw new Error('no curl')
+    yield* spawn(e)
+  } as never)
   on('ui.toast', (_, e) => { w.toasts.push(String((e as { text?: string }).text ?? '')); return { value: undefined } as never })
   on('ui.notify', (_, e) => { w.notes.push(String((e as { text?: string }).text ?? JSON.stringify(e))); return { value: { isSent: true, channel: 'terminal' } } as never })
   on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
@@ -57,6 +62,7 @@ function setup(on: On, store: Record<string, unknown>, sessionId = 's1'): World 
       w.posts.push({ url: e.url, body: String(e.init.body) })
       return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
     }
+    w.gets++
     const lines = w.feed.splice(0).map(m => JSON.stringify({ id: 'ev' + n++, event: 'message', time: 1_800_000_000, message: m }))
     return { value: { status: 200, ok: true, headers: {}, text: lines.join('\n') } }
   })
@@ -724,5 +730,136 @@ test('desktop: long messages and markup stay text', async ($, on) => {
   await openChat(ui, 'conv-' + conv)
   expect((await shows(ui, { type: 'Text', text: /evil\.example/ }))?.text).toBe(evil)
   expect((await ui.find({ key: 'older' }))?.text).toBeDefined()
+  await ui.unmount()
+})
+
+test('message states: sending then sent, delivered and read from receipts, read hidden while my receipts are off', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  const me = await start($)
+  const ui = await $.ui.mount(pane('desktop'))
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
+  await ui.input({ key: 'compose-dm:' + idOf(ahmet), text: 'merh', kind: 'change' })
+  await ui.input({ key: 'compose-dm:' + idOf(ahmet), text: 'merha', kind: 'change' })
+  expect(to(w, ahmet).filter(p => opened(p, ahmet)?.t === 'typing').length).toBe(1)
+  await ui.input({ key: 'compose-dm:' + idOf(ahmet), text: 'merhaba' })
+  const mine = opened(sent(w, ahmet).find(p => opened(p, ahmet)?.t === 'dm'), ahmet)
+  expect(to(w, ahmet).some(p => opened(p, ahmet)?.t === 'typing')).toBe(true)
+  await ui.redraw()
+  expect(await shows(ui, { type: 'Text', text: /^ ✓$/ })).toBeDefined()
+
+  w.feed.push(envelope(ahmet, me, { t: 'receipt', id: 'r1', kind: 'delivered', refs: [mine.id] }))
+  await w.clock.advance(8000)
+  await ui.redraw()
+  expect((await shows(ui, { type: 'Text', text: /^ ✓✓$/ }) as { props?: { weight?: string } })?.props?.weight).toBeUndefined()
+
+  // A stranger's receipt changes nothing; the friend's read receipt does.
+  const stranger = nacl.box.keyPair()
+  w.feed.push(envelope(stranger, me, { t: 'receipt', id: 'r2', kind: 'read', refs: [mine.id] }))
+  w.feed.push(envelope(ahmet, me, { t: 'receipt', id: 'r3', kind: 'read', refs: [mine.id] }))
+  await w.clock.advance(8000)
+  await ui.redraw()
+  expect((await shows(ui, { type: 'Text', text: /^ ✓✓$/ }) as { props?: { weight?: string } })?.props?.weight).toBe('bold')
+
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'toggle-read' })
+  await ui.press({ key: 'tab-chats' })
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
+  expect((await shows(ui, { type: 'Text', text: /^ ✓✓$/ }) as { props?: { weight?: string } })?.props?.weight).toBeUndefined()
+  await ui.unmount()
+})
+
+test('receipts out: delivered on arrival, read when the chat is drawn, no read receipt while turned off', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const veli = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet'), friend(veli, 'Veli')], privacy: { readReceipts: true, typing: true } })
+  const me = await start($)
+  w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'aaaaaaaaaaaaaaa1', name: 'A', text: 'selam' }))
+  w.feed.push(envelope(veli, me, { t: 'dm', id: 'bbbbbbbbbbbbbbb1', name: 'V', text: 'hey' }))
+  await w.clock.advance(8000)
+  const receipts = (kp: KP) => to(w, kp).map(p => opened(p, kp)).filter(p => p?.t === 'receipt')
+  expect(receipts(ahmet)).toEqual([expect.objectContaining({ kind: 'delivered', refs: ['aaaaaaaaaaaaaaa1'] })])
+
+  const ui = await $.ui.mount(pane('desktop'))
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
+  await w.clock.settle()
+  expect(receipts(ahmet).at(-1)).toMatchObject({ kind: 'read', refs: ['aaaaaaaaaaaaaaa1'] })
+
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'toggle-read' })
+  await ui.press({ key: 'tab-chats' })
+  await openChat(ui, 'conv-dm:' + idOf(veli))
+  await w.clock.settle()
+  expect(receipts(veli).map(r => r.kind)).toEqual(['delivered'])
+  await ui.unmount()
+})
+
+test('typing: shown when received, cleared by the message, ignored while turned off', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  const me = await start($)
+  const ui = await $.ui.mount(pane('desktop'))
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
+
+  w.feed.push(envelope(ahmet, me, { t: 'typing', id: 't1' }))
+  await w.clock.advance(8000)
+  await ui.redraw()
+  expect(await shows(ui, { type: 'Text', text: /^yazıyor…$/ })).toBeDefined()
+
+  w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'ccccccccccccccc1', name: 'A', text: 'geldim' }))
+  await w.clock.advance(8000)
+  await ui.redraw()
+  expect(await shows(ui, { type: 'Text', text: /^yazıyor…$/ })).toBeUndefined()
+
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'toggle-typing' })
+  await ui.press({ key: 'tab-chats' })
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
+  w.feed.push(envelope(ahmet, me, { t: 'typing', id: 't2' }))
+  await w.clock.advance(8000)
+  await ui.redraw()
+  expect(await shows(ui, { type: 'Text', text: /^yazıyor…$/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('copy: every message has a copy button', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  const me = await start($)
+  w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'ddddddddddddddd1', name: 'A', text: 'kopyala beni' }))
+  await w.clock.advance(8000)
+  const ui = await $.ui.mount(pane('desktop'))
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
+  await ui.press({ key: 'copy-ddddddddddddddd1' })
+  expect(w.toasts).toContain('Mesaj kopyalandı.')
+  await ui.unmount()
+})
+
+test('stream: a message pushed down the held-open request arrives without a poll', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const holder = { me: '', spawned: 0, argv: [] as string[] }
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] }, 's1', async function* (e) {
+    holder.spawned++
+    holder.argv = e.argv
+    yield { stream: 'stdout', text: JSON.stringify({ event: 'open' }) + '\n' }
+    const line = JSON.stringify({ id: 's1', event: 'message', time: 1_800_000_000, message: envelope(ahmet, holder.me, { t: 'dm', id: 'eeeeeeeeeeeeeee1', name: 'A', text: 'anında' }) })
+    yield { stream: 'stdout', text: line.slice(0, 40) }
+    yield { stream: 'stdout', text: line.slice(40) + '\n' }
+    await new Promise(() => {})
+  })
+  holder.me = await start($)
+  await w.clock.advance(8000)
+  await w.clock.settle()
+  expect(holder.spawned).toBe(1)
+  expect(holder.argv[0]).toBe('curl')
+  const ui = await $.ui.mount(pane('desktop'))
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
+  expect(await shows(ui, { type: 'Text', text: /^anında$/ })).toBeDefined()
+  const before = w.gets
+  await w.clock.advance(16000)
+  expect(w.gets).toBe(before)
   await ui.unmount()
 })

@@ -20,6 +20,14 @@ const STORE_VERSION = 4
 // ntfy.sh gives each IP 60 requests, then adds one every 5 seconds; polling less often than that never runs dry.
 const POLL_MS = 8000
 const POLLER_STALE_MS = POLL_MS * 3
+// The stream is one request ntfy holds open; curl ends it after this long and it opens again.
+const STREAM_MAX_S = 900
+const STREAM_RETRY_MS = 3000
+// A typing signal goes out at most this often per chat; a received one shows for this long.
+const TYPING_SEND_MS = 5000
+const TYPING_SHOW_MS = 9000
+const MSG_KEY_RE = /^[0-9a-f]{16}$/
+const MAX_REFS = 60
 const BACKOFF_MS = 60_000
 // ntfy turns a body over 4096 bytes into an attachment, which the poller cannot read.
 const MAX_BODY_BYTES = 3800
@@ -29,6 +37,10 @@ const GROUP_RE = /^[0-9a-f]{16}$/
 const USERNAME_RE = /^[a-z0-9_.]{2,24}$/
 
 type Profile = { username: string; displayName: string }
+// Off means neither side's: with read receipts off you send none and see none, as in WhatsApp.
+type Privacy = { readReceipts: boolean; typing: boolean }
+type Typing = { conv: string; from: string; until: number }
+type ReceiptKind = 'delivered' | 'read'
 type Contact = {
   id: string
   state: 'friend' | 'outgoing' | 'incoming'
@@ -55,6 +67,12 @@ type Msg = {
   forwarded?: boolean
   edited?: boolean
   deleted?: boolean
+  // Mine: 'sending' until ntfy has taken it; then the people it reached and the people who read it.
+  state?: 'sending'
+  deliveredTo?: string[]
+  readBy?: string[]
+  // Theirs: shown in an open chat, so its read receipt is sent (or, with receipts off, never will be).
+  seen?: boolean
 }
 type Notice = { key: string; sys: Sys }
 type Envelope = { v: number; from: string; nonce: string; box: string; h?: number }
@@ -69,6 +87,8 @@ type Payload =
   | { t: 'group'; id: string; g: string; name: string; text: string }
   | { t: 'invite'; id: string; g: string; title: string; name: string; members: Member[] }
   | { t: 'leave'; id: string; g: string; name: string }
+  | { t: 'receipt'; id: string; kind: ReceiptKind; refs: string[] }
+  | { t: 'typing'; id: string }
 type Status = { state: 'ok' | 'limited' | 'error'; at: number }
 type Conv = { id: string; title: string; isGroup: boolean; last: number; unread: number }
 type PostError = { code: 'tooLong' | 'limited' | 'http' | 'net'; detail: string }
@@ -86,6 +106,15 @@ let groups: Group[] = []
 let inbox: Msg[] = []
 let readAt: Record<string, number> = {}
 let status: Status | undefined
+let privacy: Privacy = { readReceipts: true, typing: true }
+let typing: Typing[] = []
+// Receipts wait here until the batch they arrived in is handled, then go out one post per person and kind.
+const receiptQueue = new Map<string, Set<string>>()
+const typingSentAt = new Map<string, number>()
+// streaming: a stream loop runs; streamLive: ntfy has opened it, so the poller can rest. streamOff: no curl here.
+let streaming = false
+let streamLive = false
+let streamOff = false
 let view: 'chats' | 'people' = 'chats'
 let selected = ''
 let renaming = ''
@@ -298,6 +327,74 @@ async function patchMessage($: EngineInterface, key: string, from: string, patch
 const systemMsg = (key: string, conv: string, sys: Sys, at: number): Msg =>
   ({ key, conv, from: '', name: '', text: '', sys, at, mine: false, system: true })
 
+function queueReceipt(to: string, kind: ReceiptKind, ref: string) {
+  const k = kind + ':' + to
+  receiptQueue.set(k, (receiptQueue.get(k) ?? new Set<string>()).add(ref))
+}
+
+async function flushReceipts($: EngineInterface) {
+  const batches = [...receiptQueue]
+  receiptQueue.clear()
+  for (const [k, refs] of batches) {
+    const at = k.indexOf(':')
+    const kind = k.slice(0, at) as ReceiptKind
+    const list = [...refs]
+    for (let i = 0; i < list.length; i += MAX_REFS) await post($, k.slice(at + 1), { t: 'receipt', id: newId(), kind, refs: list.slice(i, i + MAX_REFS) })
+  }
+}
+
+// A receipt counts only from someone the message went to; read implies delivered.
+async function ackMessages($: EngineInterface, from: string, kind: ReceiptKind, refs: string[]) {
+  const keys = new Set(refs)
+  inbox = await mutate<Msg>($, 'inbox', current =>
+    current.map(m => {
+      if (!m.mine || !keys.has(m.key) || !recipients(m.conv).some(r => r.id === from)) return m
+      const deliveredTo = m.deliveredTo?.includes(from) ? m.deliveredTo : [...(m.deliveredTo ?? []), from]
+      const readBy = kind !== 'read' || m.readBy?.includes(from) ? m.readBy : [...(m.readBy ?? []), from]
+      return { ...m, deliveredTo, readBy }
+    }))
+}
+
+// until 0 clears the person's typing mark in that chat.
+async function setTyping($: EngineInterface, conv: string, from: string, until: number) {
+  const now = await $.clock.now()
+  const had = typing.some(x => x.conv === conv && x.from === from && x.until > now)
+  if (!until && !had) return
+  typing = await mutate<Typing>($, 'typing', current => [
+    ...current.filter(x => x.until > now && !(x.conv === conv && x.from === from)),
+    ...(until > now ? [{ conv, from, until }] : []),
+  ])
+  $.ui.invalidate('ui.render')
+  if (until > now) void $.clock.sleep(until - now + 100).then(() => $.ui.invalidate('ui.render')).catch(() => {})
+}
+
+// The open chat's new messages from others are read: their senders get one receipt each, unless receipts are off.
+async function markRead($: EngineInterface, conv: string) {
+  const unseen = inbox.filter(m => m.conv === conv && !m.mine && !m.system && !m.deleted && !m.seen)
+  if (!unseen.length) return
+  const keys = new Set(unseen.map(m => m.key))
+  inbox = await mutate<Msg>($, 'inbox', current => current.map(m => (keys.has(m.key) ? { ...m, seen: true } : m)))
+  if (!privacy.readReceipts) return
+  for (const m of unseen) queueReceipt(m.from, 'read', m.key)
+  await flushReceipts($)
+}
+
+async function sendTyping($: EngineInterface, conv: string, value: string) {
+  // Direct chats only: a group would spend a post per member every few seconds of typing.
+  if (!privacy.typing || !value.trim() || !conv.startsWith('dm:') || !isFriend(conv.slice(3))) return
+  const now = await $.clock.now()
+  if (now - (typingSentAt.get(conv) ?? 0) < TYPING_SEND_MS) return
+  typingSentAt.set(conv, now)
+  await post($, conv.slice(3), { t: 'typing', id: newId() })
+}
+
+async function setPrivacy($: EngineInterface, patch: Partial<Privacy>) {
+  privacy = { ...privacy, ...patch }
+  await $.store.set('privacy', privacy)
+  if (!privacy.typing) typing = []
+  $.ui.invalidate('ui.render')
+}
+
 // Only the polling session calls this, so each machine gets one OS notification.
 function notify($: EngineInterface, title: string, text: string) {
   void $.ui.notify(text.slice(0, 200), { title }).catch(() => {})
@@ -400,7 +497,21 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
       if (c?.state !== 'friend') return
       const text = String(p.text ?? '')
       await addMessages($, [{ key: p.id, conv: convOf(env.from), from: env.from, name: ownName(c.profile), text, at, mine: false }])
+      queueReceipt(env.from, 'delivered', p.id)
+      await setTyping($, convOf(env.from), env.from, 0)
       notify($, nameOf(env.from), text)
+      return
+    }
+    case 'receipt': {
+      const refs = asArray<unknown>(p.refs).filter((r): r is string => typeof r === 'string' && MSG_KEY_RE.test(r)).slice(0, MAX_REFS)
+      if (refs.length && (p.kind === 'delivered' || p.kind === 'read')) await ackMessages($, env.from, p.kind, refs)
+      return
+    }
+    case 'typing': {
+      if (c?.state !== 'friend' || !privacy.typing) return
+      const now = await $.clock.now()
+      // A signal the poller brings in late is already over.
+      if (now - at < TYPING_SHOW_MS) await setTyping($, convOf(env.from), env.from, now + TYPING_SHOW_MS)
       return
     }
     case 'edit':
@@ -439,6 +550,7 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
   if (p.t === 'group') {
     const text = String(p.text ?? '')
     await addMessages($, [{ key: p.id, conv: groupConv(group.id), from: env.from, name: member.name, text, at, mine: false }])
+    queueReceipt(env.from, 'delivered', p.id)
     notify($, '# ' + group.title, nameOf(env.from, member.name) + ': ' + text)
   } else if (p.t === 'leave') {
     await saveGroup($, { ...group, members: group.members.filter(m => m.id !== env.from) })
@@ -458,6 +570,9 @@ async function refresh($: EngineInterface, quiet = false) {
   const savedRead = await $.store.get('readAt')
   readAt = savedRead && typeof savedRead === 'object' ? (savedRead as Record<string, number>) : {}
   status = (await $.store.get('status')) as Status | undefined
+  const savedPrivacy = (await $.store.get('privacy')) as Partial<Privacy> | undefined
+  privacy = { readReceipts: savedPrivacy?.readReceipts !== false, typing: savedPrivacy?.typing !== false }
+  typing = privacy.typing ? asArray<Typing>(await $.store.get('typing')) : []
   pollerAt = ((await $.store.get('poller')) as { at?: number } | undefined)?.at ?? 0
   if (selected && !conversations().some(c => c.id === selected)) selected = ''
 
@@ -480,8 +595,8 @@ async function refresh($: EngineInterface, quiet = false) {
   }
 
   const next = JSON.stringify([
-    lang, profile, contacts, blocked, groups, status?.state,
-    inbox.map(m => [m.key, m.text.length, m.forwarded, m.edited, m.deleted]),
+    lang, profile, contacts, blocked, groups, status?.state, privacy, typing,
+    inbox.map(m => [m.key, m.text.length, m.forwarded, m.edited, m.deleted, m.state, m.deliveredTo?.length, m.readBy?.length]),
   ])
   if (next !== signature) {
     signature = next
@@ -532,28 +647,89 @@ async function poll($: EngineInterface) {
   await setStatus($, 'ok')
 
   let last = since
-  for (const line of res.text.split('\n')) {
-    if (!line.trim()) continue
-    let ev: { id?: string; event?: string; time?: number; message?: string }
-    try { ev = JSON.parse(line) } catch { continue }
-    if (!ev || ev.event !== 'message' || !ev.id || !ev.message) continue
-    last = ev.id
-    const env = parseEnvelope(ev.message)
-    if (env) await receive($, env, (ev.time ?? 0) * 1000)
-  }
+  for (const line of res.text.split('\n')) last = (await handleLine($, line)) ?? last
   if (last !== since) await $.store.set('lastSeen', last)
+  await flushReceipts($)
+}
+
+// One line of ntfy's JSON feed, from a poll or the stream. Resolves to the message's id, the place to resume from.
+async function handleLine($: EngineInterface, line: string): Promise<string | undefined> {
+  if (!line.trim()) return undefined
+  let ev: { id?: string; event?: string; time?: number; message?: string }
+  try { ev = JSON.parse(line) } catch { return undefined }
+  if (ev?.event === 'open' || ev?.event === 'keepalive') {
+    streamLive = true
+    await setStatus($, 'ok')
+    return undefined
+  }
+  if (!ev || ev.event !== 'message' || !ev.id || !ev.message) return undefined
+  const env = parseEnvelope(ev.message)
+  if (env) await receive($, env, (ev.time ?? 0) * 1000)
+  return ev.id
+}
+
+// ntfy pushes each message down one held-open request the moment it is posted. $.http.fetch returns only a
+// finished body, so curl holds the request; where curl cannot start, the poller carries on alone.
+async function runStream($: EngineInterface) {
+  streaming = true
+  let failures = 0
+  try {
+    while (failures < 3) {
+      const current = (await $.store.get('poller')) as { session?: string } | undefined
+      if (current?.session !== session) break
+      const savedLast = await $.store.get('lastSeen')
+      const since = typeof savedLast === 'string' && savedLast ? savedLast : '12h'
+      const url = topicUrl(me) + '/json?since=' + encodeURIComponent(since)
+      let buffer = ''
+      streamLive = false
+      for await (const piece of $.process.spawn({ argv: ['curl', '-sSN', '--max-time', String(STREAM_MAX_S), url] })) {
+        if (!('text' in piece) || piece.stream !== 'stdout') continue
+        buffer += piece.text
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        await serial(async () => {
+          for (const line of lines) {
+            const id = await handleLine($, line)
+            if (id) await $.store.set('lastSeen', id)
+          }
+          await flushReceipts($)
+          await refresh($)
+        })
+      }
+      failures = streamLive ? 0 : failures + 1
+      streamLive = false
+      await $.clock.sleep(STREAM_RETRY_MS)
+    }
+  } catch {
+    streamOff = true
+  } finally {
+    streaming = false
+    streamLive = false
+  }
+}
+
+// The stream and the timer both read and write the store; one at a time keeps their reads and writes apart.
+let queue: Promise<unknown> = Promise.resolve()
+function serial<T>(fn: () => Promise<T>): Promise<T> {
+  const run = queue.then(fn, fn)
+  queue = run.catch(() => {})
+  return run
 }
 
 async function tick($: EngineInterface) {
   if (polling) return
   polling = true
   try {
-    await refresh($)
-    const now = await $.clock.now()
-    if ((await claimPoller($, now)) && now >= pauseUntil) {
-      await poll($)
+    await serial(async () => {
       await refresh($)
-    }
+      const now = await $.clock.now()
+      if (!(await claimPoller($, now))) return
+      if (!streaming && !streamOff) void runStream($)
+      if (!streamLive && now >= pauseUntil) {
+        await poll($)
+        await refresh($)
+      }
+    })
   } catch {
     // tries again on the next tick
   } finally {
@@ -650,17 +826,24 @@ function matchConv(text: string): { conv: Conv; rest: string } | undefined {
 
 async function sendText($: EngineInterface, conv: string, text: string): Promise<Outcome> {
   if (!text.trim()) return { ok: false, text: t('emptyMessage') }
+  if (!recipients(conv).length) return { ok: false, text: t('errNoRecipients') }
   const id = newId()
   const group = groups.find(g => groupConv(g.id) === conv)
-  const result = await fanOut($, conv, () =>
-    group ? { t: 'group', id, g: group.id, name: myPublicName(), text } : { t: 'dm', id, name: myPublicName(), text })
-  if (result.error) return { ok: false, text: result.error }
-
   shown.add(id)
-  await addMessages($, [{ key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true }])
+  typingSentAt.delete(conv)
+  await addMessages($, [{ key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true, state: 'sending' }])
   newerSkip = 0
   $.ui.invalidate('ui.render')
   scrollToRest($)
+  const result = await fanOut($, conv, () =>
+    group ? { t: 'group', id, g: group.id, name: myPublicName(), text } : { t: 'dm', id, name: myPublicName(), text })
+  if (result.error) {
+    inbox = await mutate<Msg>($, 'inbox', current => current.filter(m => m.key !== id))
+    $.ui.invalidate('ui.render')
+    return { ok: false, text: result.error }
+  }
+  await patchMessage($, id, me, { state: undefined })
+  $.ui.invalidate('ui.render')
   return result.missed.length ? { ok: false, text: partialText(result.missed), sent: true } : { ok: true, text: t('sent'), sent: true }
 }
 
@@ -913,6 +1096,7 @@ const ME_COLOR = '#d97757'
 // Desktop chat colours: Claude's orange for your own bubbles, and translucent greys that read on light and dark themes.
 const ACCENT = '#d97757'
 const MINE_SOFT = '#ffffffc0'
+const READ_COLOR = '#1d4ed8'
 const BUBBLE_BG = '#8e8e9326'
 const HOVER_BG = '#8e8e931a'
 const SELECTED_BG = '#d977572e'
@@ -1139,6 +1323,7 @@ export const register: Register = on => {
     const current = convs.find(c => c.id === selected) ?? convs[0]
     const redraw = () => $.ui.invalidate('ui.render')
     const toast = (text: string) => $.ui.toast(text)
+    const isTyping = (conv: string) => privacy.typing && typing.some(x => x.conv === conv && x.until > now)
 
     const copy = async (text: string, surface: typeof e.surface, done: string) => {
       const r = await $.ui.copy({ text, surface })
@@ -1252,9 +1437,20 @@ export const register: Register = on => {
       </Box>
     )
 
+    const privacyPicker = (
+      <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
+        <Text dimColor size="caption">{t('privacyLabel')}</Text>
+        <Button key="toggle-read" label={t(privacy.readReceipts ? 'readReceiptsOn' : 'readReceiptsOff')} plain dimColor={!privacy.readReceipts}
+          onPress={() => setPrivacy($, { readReceipts: !privacy.readReceipts })} />
+        <Button key="toggle-typing" label={t(privacy.typing ? 'typingOn' : 'typingOff')} plain dimColor={!privacy.typing}
+          onPress={() => setPrivacy($, { typing: !privacy.typing })} />
+      </Box>
+    )
+
     const footer = (
       <Box flexDirection="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" columnGap={2}>
         <Text dimColor size="caption">{t('e2eBadge')}</Text>
+        {privacyPicker}
         {languagePicker}
       </Box>
     )
@@ -1502,7 +1698,7 @@ export const register: Register = on => {
                   props={{
                     conv: c.id,
                     title: (c.isGroup ? '# ' : '') + c.title,
-                    preview: previewOf(last),
+                    preview: isTyping(c.id) ? t('typingNow') : previewOf(last),
                     when: last ? shortWhen(last.at, now) : '',
                     unread: c.unread,
                     accent: ACCENT,
@@ -1518,7 +1714,9 @@ export const register: Register = on => {
               <Text dimColor={c.unread === 0} color={c.unread > 0 ? ACCENT : undefined} size="caption">{last ? shortWhen(last.at, now) : ''}</Text>
             </Box>
             <Box flexDirection="row" justifyContent="space-between" columnGap={1} alignItems="center">
-              <Text dimColor={c.unread === 0} size="footnote" wrap="truncate-end">{previewOf(last)}</Text>
+              {isTyping(c.id)
+                ? <Text color={ACCENT} size="footnote" italic>{t('typingNow')}</Text>
+                : <Text dimColor={c.unread === 0} size="footnote" wrap="truncate-end">{previewOf(last)}</Text>}
               {c.unread > 0 && unreadPill(c.unread)}
             </Box>
           </Box>
@@ -1587,6 +1785,8 @@ export const register: Register = on => {
       .filter(x => x.m.conv === current.id)
       .sort((a, b) => a.m.at - b.m.at || a.i - b.i)
       .map(x => x.m)
+    // Drawn means shown: what this chat holds from others is read now.
+    void markRead($, current.id).catch(() => {})
     const editTarget = thread.find(m => m.key === editing && m.mine && !m.deleted)
     const end = Math.max(0, thread.length - newerSkip)
     // The window holds what fits between the header and the composer, counted in the pane's rows, so it follows the
@@ -1643,9 +1843,14 @@ export const register: Register = on => {
     const msgActions = (m: Msg) => {
       if (m.deleted) return null
       const marked = m.key === cursor
+      const copyButton = (
+        <Button key={'copy-' + m.key} label={graphic ? t('copyButton') : '⧉'} plain dimColor={!marked} hotkey={marked ? 'c' : undefined}
+          onPress={press => copy(m.text, press.surface, t('copiedMsg'))} />
+      )
       if (m.mine) {
         return (
           <Box flexDirection="row" columnGap={1}>
+            {copyButton}
             <Button key={'edit-' + m.key} label="✎" plain dimColor={!marked} hotkey={marked ? 'e' : undefined}
               onPress={() => { editing = m.key; redraw() }} />
             <Button key={'del-' + m.key} label="✕" plain dimColor={!marked} hotkey={marked ? 'x' : undefined}
@@ -1655,8 +1860,17 @@ export const register: Register = on => {
           </Box>
         )
       }
-      if (m.forwarded) return <Text dimColor size="caption">{t('forwarded')}</Text>
+      if (m.forwarded) {
+        return (
+          <Box flexDirection="row" columnGap={1}>
+            {copyButton}
+            <Text dimColor size="caption">{t('forwarded')}</Text>
+          </Box>
+        )
+      }
       return (
+        <Box flexDirection="row" columnGap={1}>
+        {copyButton}
         <Button key={'fwd-' + m.key} label={graphic ? t('forwardButton') : '↗'} plain dimColor={!marked} hotkey={marked ? 'f' : undefined}
           onPress={async () => {
             inbox = await mutate<Msg>($, 'inbox', cur => cur.map(x => (x.key === m.key ? { ...x, forwarded: true } : x)))
@@ -1666,7 +1880,19 @@ export const register: Register = on => {
               text: group ? t('forwardGroup', { group: group.title, name, text: m.text }) : t('forwardDm', { name, text: m.text }),
             })
           }} />
+        </Box>
       )
+    }
+
+    // ◷ sending, ✓ sent, ✓✓ reached everyone, blue ✓✓ read by everyone (shown only while my own receipts are on).
+    const ticks = (m: Msg) => {
+      if (!m.mine || m.system || m.deleted) return null
+      if (m.state === 'sending') return <Text size="caption" color={graphic ? MINE_SOFT : undefined} dimColor={!graphic}>{' ◷'}</Text>
+      const targets = recipients(m.conv).map(r => r.id)
+      const all = (list?: string[]) => targets.length > 0 && targets.every(id => list?.includes(id))
+      if (privacy.readReceipts && all(m.readBy)) return <Text size="caption" weight="bold" color={READ_COLOR}>{' ✓✓'}</Text>
+      const mark = all(m.deliveredTo) ? ' ✓✓' : ' ✓'
+      return <Text size="caption" color={graphic ? MINE_SOFT : undefined} dimColor={!graphic}>{mark}</Text>
     }
 
     const body = (m: Msg) => m.deleted
@@ -1714,6 +1940,7 @@ export const register: Register = on => {
                   <Text size="caption" color={m.mine ? MINE_SOFT : undefined} dimColor={!m.mine}>
                     {(m.edited ? t('editedShort') + ' · ' : '') + clock(m.at)}
                   </Text>
+                  {ticks(m)}
                 </Box>
               </Box>
               <Box display="none" hover={{ display: 'flex' }} flexDirection="row" columnGap={1}>{msgActions(m)}</Box>
@@ -1736,6 +1963,7 @@ export const register: Register = on => {
           <Box flexDirection={m.mine ? 'row-reverse' : 'row'} columnGap={1}
             borderStyle={m.mine ? undefined : 'quote'} borderColor={m.mine ? undefined : color}>
             {m.key === cursor && <Text color="claude" weight="bold">{m.mine ? '‹' : '›'}</Text>}
+            {ticks(m)}
             {body(m)}
             {msgActions(m)}
           </Box>
@@ -1762,6 +1990,7 @@ export const register: Register = on => {
             label={graphic ? undefined : '→ ' + (current.isGroup ? '# ' : '') + current.title}
             placeholder={t('composePlaceholder', { title: (current.isGroup ? '# ' : '') + current.title })} value="" submitLabel={t('send')}
             autoFocus={graphic ? true : undefined} rows={graphic ? 2 : undefined}
+            onInput={(value: string) => { void sendTyping($, current.id, value).catch(() => {}) }}
             onSubmit={async (value: string) => {
               const r = await sendText($, current.id, value)
               if (!r.ok) toast(r.text)
@@ -1821,7 +2050,9 @@ export const register: Register = on => {
               {avatar('head-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 40)}
               <Box flexDirection="column" flexGrow={1} flexShrink={1}>
                 <Text size="heading" weight="semibold" wrap="truncate-end">{(current.isGroup ? '# ' : '') + current.title}</Text>
-                <Text dimColor size="caption" wrap="truncate-end">{'🔒 ' + securityLine}</Text>
+                {isTyping(current.id)
+                  ? <Text color={ACCENT} size="caption" italic>{t('typingNow')}</Text>
+                  : <Text dimColor size="caption" wrap="truncate-end">{'🔒 ' + securityLine}</Text>}
               </Box>
               {statusView}
             </Box>
@@ -1863,7 +2094,9 @@ export const register: Register = on => {
           ))}
         </Box>
         {rule}
-        <Text dimColor wrap="truncate-end">{securityLine}</Text>
+        {isTyping(current.id)
+          ? <Text color="claude" italic wrap="truncate-end">{t('typingNow')}</Text>
+          : <Text dimColor wrap="truncate-end">{securityLine}</Text>}
         {olderButton}
         <Box flexDirection="column" flexGrow={1} flexShrink={1} justifyContent={align} overflow="hidden">
           {thread.length === 0 && <Text dimColor>{t('emptyThread')}</Text>}
