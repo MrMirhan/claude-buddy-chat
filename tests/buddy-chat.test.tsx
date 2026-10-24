@@ -1391,3 +1391,21 @@ test('files: picked, size-checked, sealed on the relay, received, saved and open
   expect(opens).toEqual([savedPath])
   await ui.unmount()
 })
+
+test('desktop: the text field grows with what is typed, up to 6 rows, and shrinks after sending', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  await start($)
+  const ui = await $.ui.mount(pane('desktop'))
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
+  const field = async () => (await ui.find({ key: 'compose-dm:' + idOf(ahmet) }) ?? (await ui.findAll({ type: 'Input' } as never))[0]) as { props?: { rows?: number } }
+  expect((await field())?.props?.rows).toBe(2)
+  await ui.input({ key: 'compose-dm:' + idOf(ahmet), text: 'x'.repeat(150), kind: 'change' })
+  expect((await field())?.props?.rows).toBe(4)
+  await ui.input({ key: 'compose-dm:' + idOf(ahmet), text: 'x'.repeat(2000), kind: 'change' })
+  expect((await field())?.props?.rows).toBe(6)
+  await ui.input({ key: 'compose-dm:' + idOf(ahmet), text: 'gönder' })
+  const fields = (await ui.findAll({ type: 'Input' } as never)) as { props?: { rows?: number } }[]
+  expect(fields.some(f => f.props?.rows === 2)).toBe(true)
+  await ui.unmount()
+})

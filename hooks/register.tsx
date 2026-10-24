@@ -201,6 +201,7 @@ let editingProfile = false
 let filter = ''
 // Bumped after a send so the text field is drawn fresh and empty; a field keeps what was typed while its value stays the same.
 let composeSeq = 0
+let composeRows = 2
 let addSeq = 0
 let linkSeq = 0
 let restoreSeq = 0
@@ -2096,6 +2097,7 @@ async function select($: EngineInterface, conv: string) {
   view = 'chats'
   threadOpen = true
   restedFor = ''
+  composeRows = 2
   await $.store.set('readAt', readAt)
   $.ui.invalidate('ui.render')
 }
@@ -3340,13 +3342,25 @@ export const register: Register = on => {
         : <Input key={composeKey(current.id)}
             label={graphic ? undefined : '→ ' + (current.isGroup ? '# ' : '') + current.title}
             placeholder={t('composePlaceholder', { title: (current.isGroup ? '# ' : '') + current.title })} value="" submitLabel={graphic ? '➤' : t('send')}
-            autoFocus={graphic ? true : undefined} rows={graphic ? 2 : undefined}
-            onInput={(value: string) => { void sendTyping($, current.id, value).catch(() => {}) }}
+            autoFocus={graphic ? true : undefined} rows={graphic ? composeRows : undefined}
+            onInput={(value: string) => {
+              void sendTyping($, current.id, value).catch(() => {})
+              // Desktop: the field grows upward with what is typed, from 2 rows to 6.
+              if (!graphic) return
+              const width = Math.max(10, cols - 14)
+              const lines = value.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / width)), 0)
+              const next = Math.max(2, Math.min(6, lines))
+              if (next !== composeRows) {
+                composeRows = next
+                redraw()
+              }
+            }}
             onSubmit={async (value: string) => {
               const r = await sendText($, current.id, value)
               if (!r.ok) toast(r.text)
               if (r.sent) {
                 composeSeq++
+                composeRows = 2
                 redraw()
                 // The fresh field replaces the old one, so the focus moves to it and the user keeps typing.
                 void $.ui.focus({ requestId: PANE, key: composeKey(current.id) }).catch(() => {})
