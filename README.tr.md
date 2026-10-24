@@ -159,7 +159,7 @@ Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da *
 
 - ntfy.sh her IP'ye 60 istek verir, sonra 5 saniyede bir istek ekler. HTTP 429 gelirse buddy-chat bir dakika bekler.
 - ntfy.sh mesajları 12 saat saklar. buddy-chat onaylanmayan mesajları 7 güne kadar yeniden gönderir, ama sadece 0.10 ve sonrasındaki arkadaşlara. Daha eski sürümdeki biri 12 saat içinde oturum açmazsa mesaj kaybolur.
-- Bir mesaj yaklaşık 2.500 karakter alır.
+- Claude Code'un plugin deposu en yeni 300 mesajı tutar. Daha eskiler toplu halde `~/.claude/buddy-chat/history/` altındaki dosyalara taşınır ve bir sohbetin en üstünden yukarı kaydırınca geri gelir. Bu dosyalar şifreli değildir; bağlı bir cihaz sadece depodaki mesajları alır.
 - Her grup mesajı, düzenleme ve silme üye başına bir istek harcar.
 - Okundu bilgileri ve yazıyor sinyali de istek harcar. buddy-chat her mesaj grubu için tek bir bilgi, en fazla 5 saniyede bir yazıyor sinyali gönderir. Gruplarda yazıyor göstergesi yok.
 - İletildi bilgisi, alıcıda Claude Code açıkken gider.

@@ -1105,3 +1105,40 @@ test('sound: auto chimes only when the notification was not shown; on always; of
   expect(w.sounds.length).toBe(2)
   await ui.unmount()
 })
+
+test('history: messages past the store cap go to files and come back when scrolling past the top', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const conv = 'dm:' + idOf(ahmet)
+  const files = new Map<string, string>()
+  on('env.get', (_, e) => ({ value: (e as { name: string }).name === 'HOME' ? '/home/test' : undefined }) as never)
+  on('fs.write', (_, e) => { const { path, text } = e as { path: string; text: string }; files.set(path, text); return { value: undefined } as never })
+  on('fs.list', (_, e) => {
+    const dir = (e as { path: string }).path + '/'
+    const names = [...files.keys()].filter(p => p.startsWith(dir)).map(p => p.slice(dir.length))
+    return { value: names.map(name => ({ name, kind: 'file', size: 1, mtimeMs: 0, isLink: false })) } as never
+  })
+  on('fs.read', (_, e) => ({ value: files.get((e as { path: string }).path) ?? '' }) as never)
+
+  const inbox = Array.from({ length: 300 }, (_, i) =>
+    ({ key: 'h' + String(i).padStart(15, '0'), conv, from: idOf(ahmet), name: 'A', text: 'eski ' + i, at: (i + 1) * 1000, mine: false }))
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
+  const me = await start($)
+  for (let i = 0; i < 5; i++) w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'f' + String(i).padStart(15, '0'), name: 'A', text: 'yeni ' + i }))
+  await w.clock.advance(8000)
+
+  expect(files.size).toBe(1)
+  const [path, text] = [...files.entries()][0]!
+  expect(path.startsWith('/home/test/.claude/buddy-chat/history/')).toBe(true)
+  expect(JSON.parse(text).map((m: { text: string }) => m.text)).toEqual(Array.from({ length: 51 }, (_, i) => 'eski ' + i))
+
+  const ui = await $.ui.mount(pane('desktop'))
+  await openChat(ui, 'conv-' + conv)
+  await ui.redraw()
+  expect(await shows(ui, { type: 'Text', text: /^eski 0$/ })).toBeUndefined()
+  for (let i = 0; i < 80 && !(await shows(ui, { type: 'Text', text: /^eski 0$/ })); i++) {
+    await ui.press({ key: 'older' })
+    await ui.redraw()
+  }
+  expect(await shows(ui, { type: 'Text', text: /^eski 0$/ })).toBeDefined()
+  await ui.unmount()
+})

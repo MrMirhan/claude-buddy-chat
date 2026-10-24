@@ -217,6 +217,13 @@ let wheelRows = 0
 let avgRows = 3
 const WHEEL_ROWS = 3
 let newestOpen = ''
+const STORE_MESSAGES = 300
+const ARCHIVE_TO = 250
+let historyHome = ''
+// Archived messages brought back per chat, the batch files not yet brought back, and the ones that were.
+const older = new Map<string, Msg[]>()
+const olderChunks = new Map<string, string[]>()
+const loadedChunks = new Set<string>()
 
 const composeKey = (conv: string) => 'compose-' + conv + (composeSeq ? '-' + composeSeq : '')
 let lineCopied = false
@@ -396,10 +403,91 @@ async function touchState($: EngineInterface, field: keyof SyncState['at']) {
 
 async function addMessages($: EngineInterface, msgs: Msg[]) {
   if (!msgs.length) return
+  let overflow: Msg[] = []
   inbox = await mutate<Msg>($, 'inbox', current => {
     const seen = new Set(current.map(m => m.key))
-    return [...current, ...msgs.filter(m => !seen.has(m.key))].slice(-300)
+    const all = [...current, ...msgs.filter(m => !seen.has(m.key))]
+    // Past the cap the store drops to ARCHIVE_TO, so the archive grows a batch at a time, not a file per message.
+    if (all.length <= STORE_MESSAGES) return all
+    overflow = all.slice(0, all.length - ARCHIVE_TO)
+    return all.slice(-ARCHIVE_TO)
   })
+  if (overflow.length) await archive($, overflow).catch(() => {})
+}
+
+// ---- History past the store ----
+// The shared store keeps the newest STORE_MESSAGES messages of all chats. Older ones move to files, one per batch,
+// in a folder per identity and chat, and come back a batch at a time when the person scrolls past the top.
+
+async function historyDir($: EngineInterface): Promise<string> {
+  if (!historyHome) historyHome = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''
+  return historyHome ? historyHome + '/.claude/buddy-chat/history/' + hex(nacl.hash(encode(me))).slice(0, 16) : ''
+}
+
+const convDir = (dir: string, conv: string) => dir + '/' + hex(nacl.hash(encode(conv))).slice(0, 24)
+
+async function archive($: EngineInterface, msgs: Msg[]) {
+  const dir = await historyDir($)
+  if (!dir) return
+  const byConv = new Map<string, Msg[]>()
+  for (const m of msgs) byConv.set(m.conv, [...(byConv.get(m.conv) ?? []), m])
+  for (const [conv, list] of byConv) {
+    list.sort((a, b) => a.at - b.at)
+    const first = list[0]!
+    const name = String(first.at).padStart(15, '0') + '-' + first.key.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) + '.json'
+    await $.fs.write(convDir(dir, conv) + '/' + name, JSON.stringify(list))
+    // A chat being read keeps what just left the store on screen; any other lists its files again when opened.
+    if (older.has(conv)) {
+      loadedChunks.add(conv + '/' + name)
+      const have = new Set((older.get(conv) ?? []).map(m => m.key))
+      older.set(conv, [...(older.get(conv) ?? []), ...list.filter(m => !have.has(m.key))])
+    } else {
+      olderChunks.delete(conv)
+    }
+  }
+}
+
+async function listArchive($: EngineInterface, conv: string): Promise<string[]> {
+  const known = olderChunks.get(conv)
+  if (known) return known
+  const dir = await historyDir($)
+  let names: string[] = []
+  if (dir) {
+    try {
+      names = (await $.fs.list(convDir(dir, conv))).filter(e => e.kind === 'file' && e.name.endsWith('.json')).map(e => e.name).sort()
+    } catch {
+      names = []
+    }
+  }
+  names = names.filter(n => !loadedChunks.has(conv + '/' + n))
+  olderChunks.set(conv, names)
+  return names
+}
+
+// Brings back the newest batch not yet on screen; resolves to how many messages came back.
+async function loadOlder($: EngineInterface, conv: string): Promise<number> {
+  const names = await listArchive($, conv)
+  const name = names.pop()
+  if (!name) return 0
+  loadedChunks.add(conv + '/' + name)
+  let list: Msg[] = []
+  try {
+    list = asArray<unknown>(JSON.parse(await $.fs.read(convDir(await historyDir($), conv) + '/' + name)))
+      .map(cleanMsg).filter((m): m is Msg => !!m && m.conv === conv)
+  } catch {
+    list = []
+  }
+  const have = new Set([...(older.get(conv) ?? []), ...inbox].map(m => m.key))
+  for (const m of list) shown.add(m.key)
+  older.set(conv, [...list.filter(m => !have.has(m.key)), ...(older.get(conv) ?? [])])
+  $.ui.invalidate('ui.render')
+  return list.length
+}
+
+function forgetHistory() {
+  older.clear()
+  olderChunks.clear()
+  loadedChunks.clear()
 }
 
 async function patchMessage($: EngineInterface, key: string, from: string, patch: Partial<Msg>): Promise<boolean> {
@@ -783,6 +871,7 @@ async function resetAccount($: EngineInterface) {
   sharedKeys.clear()
   hybridKeys.clear()
   topics.clear()
+  forgetHistory()
   keys = undefined
   await loadIdentity($)
   linked = false
@@ -937,6 +1026,7 @@ async function applySnapshot($: EngineInterface, value: unknown): Promise<boolea
   sharedKeys.clear()
   hybridKeys.clear()
   topics.clear()
+  forgetHistory()
   await loadIdentity($)
 
   const now = await $.clock.now()
@@ -1685,7 +1775,11 @@ const scrollToRest = ($: EngineInterface) => {
 // Moves the message window: a positive step goes to older messages, a negative one back toward the newest.
 function pageBy($: EngineInterface, step: number) {
   const next = Math.max(0, Math.min(newerSkip + step, hiddenAbove + newerSkip))
-  if (next === newerSkip) return
+  if (next === newerSkip) {
+    // Past the top of what the store holds: bring back the next archived batch.
+    if (step > 0 && selected) void loadOlder($, selected).catch(() => {})
+    return
+  }
   newerSkip = next
   $.ui.invalidate('ui.render')
 }
@@ -2525,7 +2619,8 @@ export const register: Register = on => {
     const group = current.isGroup ? groups.find(g => groupConv(g.id) === current.id) : undefined
     const peer = current.isGroup ? undefined : contactOf(current.id.slice(3))
     // Polls bring replies in batches, so the store's order is not time order: sort by time, keeping the stored order for ties.
-    const thread = inbox
+    if (!olderChunks.has(current.id)) void listArchive($, current.id).then(names => { if (names.length) redraw() }).catch(() => {})
+    const thread = [...(older.get(current.id) ?? []), ...inbox]
       .map((m, i) => ({ m, i }))
       .filter(x => x.m.conv === current.id)
       .sort((a, b) => a.m.at - b.m.at || a.i - b.i)
@@ -2568,10 +2663,12 @@ export const register: Register = on => {
     const align = start === 0 && newerSkip > 0 ? 'flex-start' : 'flex-end'
     chatShown = view === 'chats' && !!fullHeight
     restOffset = graphic ? 1 : 0
-    const olderButton = start > 0 && (
+    const archivedLeft = olderChunks.get(current.id)?.length ?? 0
+    const olderButton = (start > 0 || archivedLeft > 0) && (
       <Box justifyContent="center">
-        <Button key="older" label={t('olderMessages', { count: start })} plain dimColor hotkey={graphic ? undefined : 'o'}
-          onPress={() => pageBy($, PAGE_STEP)} />
+        <Button key="older" label={start > 0 ? t('olderMessages', { count: start }) : t('olderArchived')} plain dimColor
+          hotkey={graphic ? undefined : 'o'}
+          onPress={() => (start > 0 ? pageBy($, PAGE_STEP) : void loadOlder($, current.id).catch(() => {}))} />
       </Box>
     )
     // The pane rests with these rows out of view; they only give the wheel and the scroll keys room to raise ui.scroll.

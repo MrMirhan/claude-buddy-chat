@@ -160,6 +160,7 @@ English is the default. To use Turkish, run `/buddy-lang tr`, or select **T√ºrk√
 - ntfy.sh gives each IP address 60 requests, then adds one request every 5 seconds. If buddy-chat gets HTTP 429, it waits one minute.
 - ntfy.sh keeps messages for 12 hours. buddy-chat sends unconfirmed messages again for up to 7 days, but only to friends on 0.10 or later. A message to an older version that opens no session in 12 hours is lost.
 - One message holds about 2,500 characters.
+- Claude Code's plugin store keeps the newest 300 messages. Older ones move to files under `~/.claude/buddy-chat/history/` in batches and come back when you scroll past the top of a chat. These files are not encrypted, and a linked device gets only the messages in the store.
 - Each group message, edit and delete uses one request for each member.
 - Receipts and typing signals also use requests. buddy-chat sends one receipt for each batch of messages and one typing signal every 5 seconds at most. Groups have no typing indicator.
 - A delivered receipt goes out only while the recipient has Claude Code open.
