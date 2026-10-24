@@ -185,7 +185,7 @@ const typingSentAt = new Map<string, number>()
 let streaming = false
 let streamLive = false
 let streamOff = false
-let view: 'chats' | 'people' = 'chats'
+let view: 'chats' | 'people' | 'settings' = 'chats'
 let selected = ''
 let renaming = ''
 let threadOpen = false
@@ -2367,6 +2367,7 @@ export const register: Register = on => {
         <Box flexDirection="row" columnGap={graphic ? 1 : 2} alignItems="center">
           {tab('tab-chats', t('tabChats'), 's', view === 'chats', () => { view = 'chats'; redraw() })}
           {tab('tab-people', t('tabPeople'), 'p', view === 'people', () => { view = 'people'; redraw() }, incoming.length)}
+          {tab('tab-settings', t('tabSettings'), 'g', view === 'settings', () => { view = 'settings'; redraw() })}
         </Box>
         {statusView}
       </Box>
@@ -2442,8 +2443,7 @@ export const register: Register = on => {
     )
 
     const privacyPicker = (
-      <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
-        <Text dimColor size="caption">{t('privacyLabel')}</Text>
+      <Box flexDirection="row" columnGap={graphic ? 1 : 2} rowGap={1} alignItems="center" flexWrap="wrap">
         <Button key="toggle-read" label={t(privacy.readReceipts ? 'readReceiptsOn' : 'readReceiptsOff')} plain dimColor={!privacy.readReceipts}
           onPress={() => setPrivacy($, { readReceipts: !privacy.readReceipts })} />
         <Button key="toggle-typing" label={t(privacy.typing ? 'typingOn' : 'typingOff')} plain dimColor={!privacy.typing}
@@ -2456,13 +2456,7 @@ export const register: Register = on => {
       </Box>
     )
 
-    const footer = (
-      <Box flexDirection="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" columnGap={2}>
-        <Text dimColor size="caption">{t('e2eBadge')}</Text>
-        {privacyPicker}
-        {languagePicker}
-      </Box>
-    )
+    const footer = <Text dimColor size="caption">{t('e2eBadge')}</Text>
 
     const card = (key: string, title: RenderChildren, body: RenderChildren, color = 'inactive') => (
       <Box key={key} flexDirection="column" borderStyle="round" borderColor={color}
@@ -2604,22 +2598,41 @@ export const register: Register = on => {
       </Box>
     )
 
-    if (view === 'people') {
-      const peopleHeader = graphic
-        ? (
-          <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-            <Box flexDirection="row" columnGap={1} alignItems="center">
-              <Button key="tab-chats" label={'← ' + t('tabChats')} plain hotkey="s" onPress={() => { view = 'chats'; redraw() }} />
-              <Text size="title" weight="bold">{t('tabPeople')}</Text>
-            </Box>
-            {statusView}
+    const viewHeader = (title: string) => graphic
+      ? (
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+          <Box flexDirection="row" columnGap={1} alignItems="center">
+            <Button key="tab-chats" label={'← ' + t('tabChats')} plain hotkey="s" onPress={() => { view = 'chats'; redraw() }} />
+            <Text size="title" weight="bold">{title}</Text>
           </Box>
-        )
-        : header
+          {statusView}
+        </Box>
+      )
+      : header
+
+    if (view === 'settings') {
       return (
         <Box flexDirection="column" rowGap={1}>
-          {peopleHeader}
-          {card('me-card', profileBlock, shareRow, 'claude')}
+          {viewHeader(t('tabSettings'))}
+          {card('profile-card', <Text weight="semibold">{t('settingsProfile')}</Text>, profileBlock, 'claude')}
+          {card('privacy-card', <Text weight="semibold">{t('privacyLabel')}</Text>,
+            <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
+              <Text dimColor size="footnote">{t('privacyHint')}</Text>
+              {privacyPicker}
+            </Box>)}
+          {card('language-card', <Text weight="semibold">{t('languageLabel')}</Text>, languagePicker)}
+          {devicesCard}
+          {recoveryCard}
+          {footer}
+        </Box>
+      )
+    }
+
+    if (view === 'people') {
+      return (
+        <Box flexDirection="column" rowGap={1}>
+          {viewHeader(t('tabPeople'))}
+          {card('me-card', <Text weight="semibold">{t('shareTitle')}</Text>, shareRow, 'claude')}
           {card('add-card', <Text weight="semibold">{t('addContactLabel')}</Text>, addInput)}
 
           {incoming.length > 0 && (
@@ -2738,8 +2751,6 @@ export const register: Register = on => {
                 actions({ key: 'unblock-' + id, label: t('unblock'), onPress: () => unblock($, id) })))}
             </Box>
           )}
-          {devicesCard}
-          {recoveryCard}
           {footer}
         </Box>
       )
@@ -2861,6 +2872,7 @@ export const register: Register = on => {
             <Text weight="semibold" wrap="truncate-end">{myPublicName()}</Text>
           </Box>
           {tab('tab-people', t('tabPeople'), 'p', false, () => { view = 'people'; redraw() }, incoming.length)}
+          {tab('tab-settings', t('tabSettings'), 'g', false, () => { view = 'settings'; redraw() })}
         </Box>
       </Box>
     )

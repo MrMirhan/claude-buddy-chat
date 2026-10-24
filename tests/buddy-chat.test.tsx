@@ -509,7 +509,11 @@ test('the language switches between English and Turkish, and system lines follow
   const ui = await $.ui.mount(pane('desktop'))
   await ui.press({ key: 'tab-people' })
   expect(await shows(ui, { type: 'Text', text: /Arkadaşlar/ })).not.toBeUndefined()
+  await ui.press({ key: 'tab-chats' })
+  await ui.press({ key: 'tab-settings' })
   await ui.press({ key: 'lang-en' })
+  await ui.press({ key: 'tab-chats' })
+  await ui.press({ key: 'tab-people' })
   expect(await shows(ui, { type: 'Text', text: /Friends/ })).not.toBeUndefined()
   await ui.unmount()
 
@@ -774,7 +778,7 @@ test('message states: sending then sent, delivered and read from receipts, read 
   expect((await shows(ui, { type: 'Text', text: /^ ✓✓$/ }) as { props?: { weight?: string } })?.props?.weight).toBe('bold')
 
   await ui.press({ key: 'back' })
-  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'tab-settings' })
   await ui.press({ key: 'toggle-read' })
   await ui.press({ key: 'tab-chats' })
   await openChat(ui, 'conv-dm:' + idOf(ahmet))
@@ -799,7 +803,7 @@ test('receipts out: delivered on arrival, read when the chat is drawn, no read r
   expect(receipts(ahmet).at(-1)).toMatchObject({ kind: 'read', refs: ['aaaaaaaaaaaaaaa1'] })
 
   await ui.press({ key: 'back' })
-  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'tab-settings' })
   await ui.press({ key: 'toggle-read' })
   await ui.press({ key: 'tab-chats' })
   await openChat(ui, 'conv-dm:' + idOf(veli))
@@ -826,7 +830,7 @@ test('typing: shown when received, cleared by the message, ignored while turned 
   expect(await shows(ui, { type: 'Text', text: /^yazıyor…$/ })).toBeUndefined()
 
   await ui.press({ key: 'back' })
-  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'tab-settings' })
   await ui.press({ key: 'toggle-typing' })
   await ui.press({ key: 'tab-chats' })
   await openChat(ui, 'conv-dm:' + idOf(ahmet))
@@ -900,7 +904,7 @@ test('notifications: a muted chat, the open chat and the global switch stay quie
   await w.clock.advance(8000)
   expect(w.notes.some(n => n.includes('kapalıyken'))).toBe(true)
 
-  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'tab-settings' })
   await ui.press({ key: 'toggle-notify' })
   w.feed.push(envelope(veli, me, { t: 'dm', id: 'fffffffffffffff4', name: 'V', text: 'hiç' }))
   await w.clock.advance(8000)
@@ -1049,7 +1053,7 @@ test('devices: the main device lists linked devices and removes one; a linked de
   w.feed.push(self({ dev: 'laptop-dev', kind: 'hello', name: 'laptop', primary: false }))
   await w.clock.advance(8000)
   const ui = await $.ui.mount(pane('desktop'))
-  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'tab-settings' })
   expect(await shows(ui, { type: 'Text', text: /^laptop/ })).toBeDefined()
   expect(await ui.find({ key: 'link-start' })).toBeUndefined()
 
@@ -1068,7 +1072,7 @@ test('devices: a linked device that unlinks deletes the account and starts over'
   const before = await start($)
   expect(before).toBe(idOf(mine))
   const ui = await $.ui.mount(pane('desktop'))
-  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'tab-settings' })
   w.answer.value = 'Ayır'
   await ui.press({ key: 'device-leave' })
   const byes = w.posts.filter(p => p.url === topicOf(idOf(mine))).map(p => opened(p, mine)).filter(p => p?.kind === 'bye')
@@ -1095,7 +1099,7 @@ test('sound: auto chimes only when the notification was not shown; on always; of
   expect(w.sounds[0]).toContain('sounds/message.wav')
 
   const ui = await $.ui.mount(pane('desktop'))
-  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'tab-settings' })
   await ui.press({ key: 'toggle-sound' })
   w.notifySent = true
   await say('a0a0a0a0a0a0a0a3')
@@ -1173,7 +1177,7 @@ test('recovery: a new identity has 12 words that make the same keys; an older on
   const w = setup(on, { ...V4 })
   const me = await start($)
   const ui = await $.ui.mount(pane('desktop'))
-  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'tab-settings' })
   w.answer.value = 'Göster'
   await ui.press({ key: 'words-show' })
   const words = await wordsShown(ui as never)
@@ -1190,7 +1194,7 @@ test('recovery: 24 words of an older identity hold its secret key', async ($, on
   const w = setup(on, { ...V4, secretKey: b64(mine.secretKey) })
   await start($)
   const ui = await $.ui.mount(pane('desktop'))
-  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'tab-settings' })
   w.answer.value = 'Göster'
   await ui.press({ key: 'words-show' })
   const words = await wordsShown(ui as never)
@@ -1206,7 +1210,7 @@ test('recovery: restoring from words brings back the Buddy ID', async ($, on) =>
   const entropy = nacl.randomBytes(16)
   const expected = b64(nacl.box.keyPair.fromSecretKey(keysFromEntropy(entropy).secretKey).publicKey)
   const ui = await $.ui.mount(pane('desktop'))
-  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'tab-settings' })
   w.answer.value = 'Geri yükle'
   await ui.input({ key: 'restore-words', text: toWords(entropy).join(' ') })
   const after = /(?:ID'n|ID): (\S{43})/.exec((await run($, 'buddy-id')).text ?? '')?.[1]
@@ -1286,7 +1290,7 @@ test('backup: the folder comes from the system dialog; without one a path field 
   setup(on, { ...V4, secretKey: b64(mine.secretKey) })
   await start($)
   const ui = await $.ui.mount(pane('desktop'))
-  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'tab-settings' })
   expect(await ui.find({ key: 'backup-path' })).toBeUndefined()
   await ui.press({ key: 'backup-choose' })
   expect([...files.keys()].some(p => p.startsWith('/Users/test/Yedek/buddy-chat-') && p.endsWith('/account.backup'))).toBe(true)
