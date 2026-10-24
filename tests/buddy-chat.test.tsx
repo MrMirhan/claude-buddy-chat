@@ -132,8 +132,10 @@ test('request, accept, profile and a local nickname that never leaves this machi
 
   await run($, 'buddy-send', 'kanka selam kanka')
   await run($, 'buddy-send', '@ayilmaz ikinci')
-  const texts = sent(w, ayse).slice(1).map(p => opened(p, ayse))
+  const texts = sent(w, ayse).map(p => opened(p, ayse)).filter(p => p?.t === 'dm')
   expect(texts.map(p => p?.text)).toEqual(['selam kanka', 'ikinci'])
+  // Accepted: my profile followed, so a name set after the request still reaches her.
+  expect(sent(w, ayse).map(p => opened(p, ayse)).some(p => p?.t === 'profile')).toBe(true)
   expect(w.posts.some(p => JSON.stringify(opened(p, ayse)).includes('Kanka'))).toBe(false)
 })
 

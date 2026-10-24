@@ -357,6 +357,8 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
       await saveContact($, { ...c, state: 'friend', profile: cleanProfile(p.profile) })
       if (c.state === 'outgoing') {
         await sendKem($, env.from)
+        // The request carried the profile as it was then; the name may have been set since.
+        if (ownName(profile)) await post($, env.from, { t: 'profile', id: newId(), profile })
         await addMessages($, [systemMsg(p.id, convOf(env.from), { key: 'sysFriends' }, at)])
         notify($, 'buddy-chat', t('notifyAccepted', { name: nameOf(env.from) }))
       }
@@ -382,7 +384,7 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
       return
     }
     case 'profile':
-      if (c?.state === 'friend') await saveContact($, { ...c, profile: cleanProfile(p.profile) })
+      if (c?.state === 'friend' || c?.state === 'incoming') await saveContact($, { ...c, profile: cleanProfile(p.profile) })
       return
     case 'unfriend': {
       if (!c) return
@@ -763,7 +765,9 @@ async function broadcastProfile($: EngineInterface) {
   const sent = JSON.stringify(profile)
   if (!ownName(profile) || (await $.store.get('profileSent')) === sent) return
   await $.store.set('profileSent', sent)
-  for (const f of friends()) await post($, f.id, { t: 'profile', id: newId(), profile })
+  // People we asked get it too, so a request sent before the name was set does not stay nameless.
+  const to = contacts.filter(c => c.state === 'friend' || c.state === 'outgoing')
+  for (const c of to) await post($, c.id, { t: 'profile', id: newId(), profile })
 }
 
 async function sendInvites($: EngineInterface, group: Group): Promise<string[]> {
