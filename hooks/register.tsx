@@ -1167,6 +1167,10 @@ const std64 = (bytes: Uint8Array) => b64(bytes).replace(/-/g, '+').replace(/_/g,
 // A name safe to save under: no folders, no leading dot, no characters a file system refuses.
 const safeName = (name: string) => cleanText(name, 120).replace(/[\/\\:*?"<>|]/g, '_').replace(/^\.+/, '') || 'file'
 const sizeText = (n: number) => (n < 1024 * 1024 ? Math.max(1, Math.round(n / 1024)) + ' KB' : (n / 1024 / 1024).toFixed(1) + ' MB')
+// Files that run when opened. They are shown in the file manager, never opened, so a friend cannot start a program here.
+const RUNNABLE = new Set(['app', 'command', 'sh', 'bash', 'zsh', 'pkg', 'mpkg', 'dmg', 'exe', 'msi', 'bat', 'cmd', 'ps1', 'vbs', 'js',
+  'jar', 'scpt', 'applescript', 'workflow', 'terminal', 'py', 'rb', 'pl', 'php', 'deb', 'rpm', 'appimage', 'run', 'bin', 'lnk', 'url', 'webloc'])
+const isRunnable = (name: string) => RUNNABLE.has(name.split('.').pop()?.toLowerCase() ?? '')
 const fileIcon = (mime: string) => (mime.startsWith('image/') ? '🖼' : mime.startsWith('video/') ? '🎬' : mime.startsWith('audio/') ? '🎵' : '📎')
 
 function cleanFile(value: unknown): FileRef | undefined {
@@ -1194,7 +1198,20 @@ async function writeBytes($: EngineInterface, path: string, base64: string): Pro
   return false
 }
 
+async function revealPath($: EngineInterface, path: string) {
+  const dir = path.slice(0, path.lastIndexOf('/')) || path
+  for (const argv of [['open', '-R', path], ['xdg-open', dir], ['explorer', '/select,' + path]]) {
+    try {
+      if ((await $.process.run(argv, { timeoutMs: 10_000 })).exitCode === 0) return
+    } catch {
+      // not on this system
+    }
+  }
+  $.ui.toast(t('fileOpenFailed'))
+}
+
 async function openPath($: EngineInterface, path: string) {
+  if (isRunnable(path)) return revealPath($, path)
   for (const argv of [['open', path], ['xdg-open', path], ['cmd', '/c', 'start', '', path]]) {
     try {
       if ((await $.process.run(argv, { timeoutMs: 10_000 })).exitCode === 0) return
@@ -1245,6 +1262,13 @@ async function downloadFile($: EngineInterface, msg: Msg): Promise<boolean> {
   if (!home) return false
   const path = home + '/Downloads/buddy-chat/' + msg.key.slice(0, 6) + '-' + msg.file.name
   if (!(await writeBytes($, path, std64(plain)))) return false
+  // A file the browser downloads carries macOS's quarantine mark, so Gatekeeper asks before it runs; this one gets it too.
+  try {
+    const stamp = Math.floor((await $.clock.now()) / 1000).toString(16)
+    await $.process.run(['xattr', '-w', 'com.apple.quarantine', '0081;' + stamp + ';buddy-chat;', path], { timeoutMs: 10_000 })
+  } catch {
+    // not macOS
+  }
   await patchMessage($, msg.key, msg.from, { saved: path })
   $.ui.invalidate('ui.render')
   return true
@@ -3213,7 +3237,9 @@ export const register: Register = on => {
           {m.saved
             ? (
               <Box flexDirection="row" columnGap={1}>
-                <Button key={'file-open-' + m.key} label={t('fileOpen')} plain onPress={() => openPath($, m.saved!)} />
+                {isRunnable(f.name)
+                  ? <Button key={'file-show-' + m.key} label={t('fileReveal')} plain onPress={() => revealPath($, m.saved!)} />
+                  : <Button key={'file-open-' + m.key} label={t('fileOpen')} plain onPress={() => openPath($, m.saved!)} />}
                 {f.mime.startsWith('audio/') && <Button key={'file-play-' + m.key} label="▶" plain onPress={() => playFile($, m)} />}
               </Box>
             )

@@ -1348,6 +1348,7 @@ test('files: picked, size-checked, sealed on the relay, received, saved and open
   const photo = nacl.randomBytes(1234)
   let picked = '/Users/test/foto.jpg'
   const opens: string[] = []
+  const marks: string[] = []
   on('env.get', (_, e) => ({ value: (e as { name: string }).name === 'HOME' ? '/home/test' : undefined }) as never)
   on('fs.write', (_, e) => { const { path, text } = e as { path: string; text: string }; disk.set(path, text); return { value: undefined } as never })
   on('fs.stat', (_, e) => ({ value: { kind: 'file', size: (e as { path: string }).path.includes('big') ? 4_000_000 : photo.length, mtimeMs: 0, isLink: false } }) as never)
@@ -1359,7 +1360,8 @@ test('files: picked, size-checked, sealed on the relay, received, saved and open
     const { argv, stdin } = e as { argv: string[]; stdin?: string }
     if (argv[0] === 'osascript') return { value: { exitCode: 0, stdout: picked + '\n', stderr: '' } } as never
     if (argv[0] === 'base64') { disk.set(argv[3]!, 'BYTES:' + stdin); return { value: { exitCode: 0, stdout: '', stderr: '' } } as never }
-    if (argv[0] === 'open') { opens.push(argv[1]!); return { value: { exitCode: 0, stdout: '', stderr: '' } } as never }
+    if (argv[0] === 'open') { opens.push(argv.slice(1).join(' ')); return { value: { exitCode: 0, stdout: '', stderr: '' } } as never }
+    if (argv[0] === 'xattr') { marks.push(argv[argv.length - 1]!); return { value: { exitCode: 0, stdout: '', stderr: '' } } as never }
     throw new Error('not found')
   })
   const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
@@ -1389,6 +1391,16 @@ test('files: picked, size-checked, sealed on the relay, received, saved and open
   await ui.redraw()
   await ui.press({ key: 'file-open-e5e5e5e5e5e5e5e5' })
   expect(opens).toEqual([savedPath])
+  expect(marks).toContain(savedPath)
+
+  // A file that would run is shown in its folder, never opened.
+  w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'e6e6e6e6e6e6e6e6', name: 'A', text: '📎 kur.command', file: { ...msg.file, name: 'kur.command' } }))
+  await w.clock.advance(8000)
+  await w.clock.settle()
+  await ui.redraw()
+  expect(await ui.find({ key: 'file-open-e6e6e6e6e6e6e6e6' })).toBeUndefined()
+  await ui.press({ key: 'file-show-e6e6e6e6e6e6e6e6' })
+  expect(opens.at(-1)?.startsWith('-R ')).toBe(true)
   await ui.unmount()
 })
 
