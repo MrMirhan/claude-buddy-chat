@@ -107,6 +107,12 @@ let atBottom = true
 let cursor = ''
 let hiddenAbove = 0
 let firstShownKey = ''
+// Desktop: the chat fills the pane's height and clips at the top, so it pages instead of scrolling.
+// newerSkip is how many of the newest messages sit below the window; 0 shows the newest.
+let newerSkip = 0
+let paged = false
+const GRAPHIC_WINDOW = 60
+const PAGE_STEP = 8
 
 const composeKey = (conv: string) => 'compose-' + conv + (composeSeq ? '-' + composeSeq : '')
 let lineCopied = false
@@ -812,6 +818,7 @@ async function select($: EngineInterface, conv: string) {
   selected = conv
   editing = ''
   olderExtra = 0
+  newerSkip = 0
   cursor = ''
   view = 'chats'
   threadOpen = true
@@ -825,11 +832,21 @@ const scrollToEnd = ($: EngineInterface) => { void $.ui.scroll({ to: 'end', in: 
 
 // Loads one page of older messages and keeps the message that was at the top where it was.
 function loadOlder($: EngineInterface) {
+  if (paged) return pageBy($, PAGE_STEP)
   if (hiddenAbove <= 0) return
   const anchor = firstShownKey
   olderExtra += OLDER_PAGE
   $.ui.invalidate('ui.render')
   if (anchor) void $.ui.scroll({ to: { key: 'msg-' + anchor }, in: PANE, block: 'start' }).catch(() => {})
+}
+
+// Moves the Desktop window: a positive step goes to older messages, a negative one back toward the newest.
+function pageBy($: EngineInterface, step: number) {
+  const next = Math.max(0, Math.min(newerSkip + step, hiddenAbove + newerSkip))
+  if (next === newerSkip) return
+  newerSkip = next
+  atBottom = newerSkip === 0
+  $.ui.invalidate('ui.render')
 }
 
 async function closeThread($: EngineInterface) {
@@ -840,6 +857,7 @@ async function closeThread($: EngineInterface) {
   threadOpen = false
   editing = ''
   olderExtra = 0
+  newerSkip = 0
   cursor = ''
   $.ui.invalidate('ui.render')
 }
@@ -1085,6 +1103,10 @@ export const register: Register = on => {
 
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
     const result = await next(e)
+    if (paged && threadOpen) {
+      pageBy($, e.by < 0 ? 3 : -3)
+      return result
+    }
     atBottom = e.offset + e.bodyRows >= e.contentRows - 1
     if (threadOpen && e.by < 0 && e.offset <= 0) loadOlder($)
     return result
@@ -1107,6 +1129,8 @@ export const register: Register = on => {
     const Svg = graphic && 'Svg' in els ? els.Svg : undefined
     const Client = e.surface === 'desktop' && 'Client' in els ? els.Client : undefined
     const cols = Math.max(20, e.props.bodyColumns)
+    // The rows the pane gives its body: the chat is drawn this tall so it never scrolls the list and the header away.
+    const fullHeight = e.props.scroll?.bodyRows || undefined
     const now = await $.clock.now()
     if (!selected && !graphic) selected = conversations()[0]?.id ?? ''
     const convs = conversations()
@@ -1561,14 +1585,25 @@ export const register: Register = on => {
       .sort((a, b) => a.m.at - b.m.at || a.i - b.i)
       .map(x => x.m)
     const editTarget = thread.find(m => m.key === editing && m.mine && !m.deleted)
-    const visible = thread.slice(-Math.min(thread.length, THREAD_WINDOW + olderExtra))
-    const hidden = thread.length - visible.length
-    hiddenAbove = hidden
+    paged = graphic
+    const end = graphic ? Math.max(0, thread.length - newerSkip) : thread.length
+    const visible = graphic
+      ? thread.slice(Math.max(0, end - GRAPHIC_WINDOW), end)
+      : thread.slice(-Math.min(thread.length, THREAD_WINDOW + olderExtra))
+    const hidden = (graphic ? end : thread.length) - visible.length
+    const below = thread.length - end
+    hiddenAbove = graphic ? Math.max(0, end - 1) : hidden
     firstShownKey = visible[0]?.key ?? ''
-    const olderButton = hidden > 0 && (
+    // On Desktop the window clips older messages at the top, so how many are out of sight is not known: offer older ones while any exist.
+    const olderButton = (graphic ? end > PAGE_STEP : hidden > 0) && (
       <Box justifyContent="center">
-        <Button key="older" label={t('olderMessages', { count: hidden })} plain dimColor hotkey={graphic ? undefined : 'o'}
-          onPress={() => loadOlder($)} />
+        <Button key="older" label={graphic ? t('olderPage') : t('olderMessages', { count: hidden })} plain dimColor
+          hotkey={graphic ? undefined : 'o'} onPress={() => loadOlder($)} />
+      </Box>
+    )
+    const newerButton = graphic && below > 0 && (
+      <Box justifyContent="center">
+        <Button key="newer" label={t('newerMessages', { count: below })} plain dimColor onPress={() => pageBy($, -PAGE_STEP)} />
       </Box>
     )
     const securityLine = group
@@ -1710,7 +1745,8 @@ export const register: Register = on => {
 
     if (graphic) {
       const threadPane = (
-        <Box key="thread" flexDirection="column" flexGrow={1} flexShrink={1} paddingLeft={split ? 2 : 0}>
+        <Box key="thread" flexDirection="column" flexGrow={1} flexShrink={1} paddingLeft={split ? 2 : 0}
+          height={fullHeight} overflow="hidden">
           <Box flexDirection="row" columnGap={1} alignItems="center" paddingBottom={1}>
             <Button key="back" label="←" plain hotkey="b" onPress={() => closeThread($)} />
             {avatar('head-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 40)}
@@ -1722,20 +1758,21 @@ export const register: Register = on => {
           </Box>
           {olderButton}
           {thread.length === 0 && (
-            <Box flexDirection="column" alignItems="center" rowGap={1} marginY={3}>
+            <Box flexDirection="column" alignItems="center" rowGap={1} marginY={3} flexGrow={1}>
               {avatar('empty-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 72)}
               <Text size="title" weight="semibold">{(current.isGroup ? '# ' : '') + current.title}</Text>
               <Text dimColor size="caption">{'🔒 ' + securityLine}</Text>
               <Text dimColor>{t('sayHi')}</Text>
             </Box>
           )}
-          <Box flexDirection="column" flexGrow={1}>{rowsView}</Box>
-          <Box flexDirection="column" alignItems="stretch" width="100%" marginTop={1}>{composer}</Box>
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} justifyContent="flex-end" overflow="hidden">{rowsView}</Box>
+          {newerButton}
+          <Box flexDirection="column" alignItems="stretch" width="100%" marginTop={1} flexShrink={0}>{composer}</Box>
         </Box>
       )
       if (!split) return threadPane
       return (
-        <Box flexDirection="row" columnGap={1}>
+        <Box flexDirection="row" columnGap={1} height={fullHeight} overflow="hidden">
           {sidebar}
           {threadPane}
         </Box>

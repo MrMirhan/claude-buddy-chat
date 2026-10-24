@@ -76,7 +76,8 @@ Panel her yüzeyde aynı, ama her uygulama kendi görünümüyle çizer.
 
 - `✎` mesajını düzenler, `✕` herkesten siler.
 - `↗` gelen mesajı Claude'a iletir; mesajın senden değil arkadaşından geldiği notuyla.
-- Sohbet en yeni mesajında açılır ve son 30 mesajı gösterir. En üste kaydırınca ya da **eski mesajlar**'a basınca (terminalde `o`) 20 mesaj daha yüklenir.
+- Desktop'ta sohbet paneli doldurur: liste ve sohbet başlığı yerinde kalır, yazı alanı hep en altta. **↑ Eski mesajlar** ve **↓ yeni mesaj** butonlarıyla sohbette sayfa sayfa gezilir.
+- Terminalde sohbet en yeni mesajında açılır ve son 30 mesajı gösterir. En üste kaydırınca ya da `o`'ya basınca 20 mesaj daha yüklenir.
 - `s` **Sohbetler**'i, `p` **Kişiler**'i açar.
 
 ## Komutlar

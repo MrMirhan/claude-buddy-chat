@@ -76,7 +76,8 @@ The pane is the same on every surface. Each app draws it in its own style.
 
 - `✎` edits your message. `✕` deletes it for everyone.
 - `↗` sends an incoming message to Claude, with a note that it comes from your friend and not from you.
-- A chat opens at its newest message and shows the last 30 messages. Scroll to the top, or select **older messages** (`o` in the terminal), to load 20 more.
+- On Desktop, a chat fills the pane: the list and the chat header stay in place, and the text field stays at the bottom. Select **↑ Older messages** and **↓ newer messages** to page through the chat.
+- In the terminal, a chat opens at its newest message and shows the last 30 messages. Scroll to the top, or press `o`, to load 20 more.
 - `s` opens **Chats** and `p` opens **People**.
 
 ## Commands

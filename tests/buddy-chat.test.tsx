@@ -595,7 +595,8 @@ test('a thread is in time order even when replies were stored late, and older me
   setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
   await start($)
 
-  const ui = await $.ui.mount(pane('desktop'))
+  // The terminal shows the last 30 messages and scrolls; Desktop pages, tested on its own.
+  const ui = await $.ui.mount(pane('terminal'))
   await openChat(ui, 'conv-' + conv)
   expect(await ui.find({ type: 'Text', text: /^mesaj 34$/ })).not.toBeUndefined()
   // 36 messages in all: the newest 30 are mesaj 5 to mesaj 34.
@@ -637,5 +638,31 @@ test('terminal: j/k mark messages, the marked one takes e/x/f, and People moved 
   await ui.press({ key: 'nav-down' })
   await ui.press({ key: 'nav-down' })
   expect(await ui.find({ type: 'Text', text: /^[‹›]$/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('desktop: the chat fills the pane height and pages through older and newer messages', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const conv = 'dm:' + idOf(ahmet)
+  const inbox = Array.from({ length: 80 }, (_, i) =>
+    ({ key: 'p' + i, conv, from: idOf(ahmet), name: 'A', text: 'satır ' + i, at: (i + 1) * 1000, mine: false }))
+  setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
+  await start($)
+  const wide = { ...pane('desktop'), props: { ...pane('desktop').props, bodyColumns: 140 } }
+  const ui = await $.ui.mount(wide)
+  await openChat(ui, 'conv-' + conv)
+  expect(await ui.find({ key: 'compose-' + conv })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^satır 79$/ })).not.toBeUndefined()
+  expect(await ui.find({ key: 'newer' })).toBeUndefined()
+
+  await ui.press({ key: 'older' })
+  expect(await ui.find({ type: 'Text', text: /^satır 79$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^satır 71$/ })).not.toBeUndefined()
+  expect((await ui.find({ key: 'newer' }))?.text).toContain('8')
+  expect(await ui.find({ key: 'conv-' + conv })).not.toBeUndefined()
+
+  await ui.press({ key: 'newer' })
+  expect(await ui.find({ type: 'Text', text: /^satır 79$/ })).not.toBeUndefined()
+  expect(await ui.find({ key: 'newer' })).toBeUndefined()
   await ui.unmount()
 })
