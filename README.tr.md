@@ -120,7 +120,7 @@ Panel her yüzeyde aynı, ama her uygulama kendi görünümüyle çizer.
 | `/buddy-send <kişi ya da grup> <mesaj>` | Mesaj gönder |
 | `/buddy-group <ad> <kişi1> [kişi2 ...]` | Grup kur |
 | `/buddy-lang <en ya da tr>` | Dili ayarla |
-| `/buddy-backup [klasör \| off \| now \| load <dosya>]` | Şifreli yerel yedeği aç, kapat, şimdi yedekle ya da bir yedek yükle |
+| `/buddy-backup [klasör \| off \| now \| load <klasör>]` | Şifreli yerel yedeği aç, kapat, şimdi yedekle ya da bir yedek yükle |
 | `/buddy-link [kod]` | Kodsuz: yeni cihazda bir kod göster. Kodla: o cihazı hesabına bağla |
 
 Bir kişiyi takma adıyla, görünen adıyla ya da `@kullanıcıadı` ile anabilirsin.
@@ -153,7 +153,7 @@ Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da *
 
 **Kişiler → Kurtarma ve yedek**, bir onaydan sonra kurtarma kelimelerini gösterir. Onları kâğıda yaz. Yeni ya da formatlanmış bir bilgisayarda aynı karta yaz; Buddy ID'n geri gelir, arkadaşların seni kaybetmez. 0.17 ve sonrasında oluşan hesapların 12 kelimesi var; daha eski hesapların anahtarı kelimelerden üretilmediği için 24 kelimesi var. Kelimeler hiçbir komuttan geçmez, çünkü isteme yazılan her şey konuşma kaydında kalır.
 
-Kelimeler kişileri ve mesajları içermez. Onlar için aynı kartta ya da `/buddy-backup <klasör>` ile bir yedek klasörü seç. buddy-chat bir şey değiştiyse 10 dakikada bir oraya `buddy-chat-<id>.backup` yazar. Dosya gizli anahtarından türeyen bir anahtarla şifrelenir; sadece kurtarma kelimelerin açar. Geri yüklemeden sonra dosyayı kartta ya da `/buddy-backup load <dosya>` ile yükle. Klasör seçene kadar yedek kapalıdır. Bir bulut sürücünün eşitlediği klasör de olur.
+Kelimeler kişileri ve mesajları içermez. Onlar için aynı kartta ya da `/buddy-backup <klasör>` ile bir yedek klasörü seç. buddy-chat orada bir `buddy-chat-<id>` klasörü tutar ve bir şey değiştiyse 10 dakikada bir günceller: kişileri, grupları, ayarları ve son mesajları içeren `account.backup`, ve eski mesaj dosyalarının her birinin şifreli bir kopyası. Her dosya gizli anahtarından türeyen bir anahtarla şifrelenir; sadece kurtarma kelimelerin açar. Geri yüklemeden sonra klasörü kartta ya da `/buddy-backup load <klasör>` ile yükle; eski mesajlar da geri gelir. Klasör seçene kadar yedek kapalıdır. Bir bulut sürücünün eşitlediği klasör de olur.
 
 ## Güvenlik sınırları
 
@@ -168,7 +168,7 @@ Kelimeler kişileri ve mesajları içermez. Onlar için aynı kartta ya da `/bud
 
 - ntfy.sh her IP'ye 60 istek verir, sonra 5 saniyede bir istek ekler. HTTP 429 gelirse buddy-chat bir dakika bekler.
 - ntfy.sh mesajları 12 saat saklar. buddy-chat onaylanmayan mesajları 7 güne kadar yeniden gönderir, ama sadece 0.10 ve sonrasındaki arkadaşlara. Daha eski sürümdeki biri 12 saat içinde oturum açmazsa mesaj kaybolur.
-- Claude Code'un plugin deposu en yeni 300 mesajı tutar. Daha eskiler toplu halde `~/.claude/buddy-chat/history/` altındaki dosyalara taşınır ve bir sohbetin en üstünden yukarı kaydırınca geri gelir. Bu dosyalar şifreli değildir; bağlı bir cihaz sadece depodaki mesajları alır.
+- Claude Code'un plugin deposu en yeni 300 mesajı tutar. Daha eskiler toplu halde `~/.claude/buddy-chat/history/` altındaki dosyalara taşınır ve bir sohbetin en üstünden yukarı kaydırınca geri gelir. Bu dosyalar şifreli değildir; yedek onların şifreli kopyalarını tutar. Bağlı bir cihaz sadece depodaki mesajları alır.
 - Her grup mesajı, düzenleme ve silme üye başına bir istek harcar.
 - Okundu bilgileri ve yazıyor sinyali de istek harcar. buddy-chat her mesaj grubu için tek bir bilgi, en fazla 5 saniyede bir yazıyor sinyali gönderir. Gruplarda yazıyor göstergesi yok.
 - İletildi bilgisi, alıcıda Claude Code açıkken gider.

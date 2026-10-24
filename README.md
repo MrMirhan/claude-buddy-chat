@@ -120,7 +120,7 @@ The pane is the same on every surface. Each app draws it in its own style.
 | `/buddy-send <person or group> <message>` | Send a message |
 | `/buddy-group <name> <person1> [person2 ...]` | Create a group |
 | `/buddy-lang <en or tr>` | Set the language |
-| `/buddy-backup [folder \| off \| now \| load <file>]` | Turn the encrypted local backup on or off, write one now, or load one |
+| `/buddy-backup [folder \| off \| now \| load <folder>]` | Turn the encrypted local backup on or off, write one now, or load one |
 | `/buddy-link [code]` | Without a code: show a code on a new device. With a code: link that device to your account |
 
 You can name a person by their nickname, their display name or their `@username`.
@@ -153,7 +153,7 @@ English is the default. To use Turkish, run `/buddy-lang tr`, or select **Türk�
 
 **People → Recovery and backup** shows your recovery words after a confirmation. Write them on paper. On a new or wiped computer, type them in the same card, and your Buddy ID comes back: friends keep you. Accounts made with 0.17 or later have 12 words; older accounts have 24, because their key was not made from words. The words never go through a command, because what you type at the prompt is kept in the transcript.
 
-The words do not hold contacts or messages. For those, set a backup folder in the same card or with `/buddy-backup <folder>`. buddy-chat then writes `buddy-chat-<id>.backup` there every 10 minutes when something changed. The file is sealed with a key that comes from your secret key, so only your recovery words open it. After a restore, load the file in the card or with `/buddy-backup load <file>`. Backup is off until you set a folder. A folder that a cloud drive syncs works too.
+The words do not hold contacts or messages. For those, set a backup folder in the same card or with `/buddy-backup <folder>`. buddy-chat then keeps a `buddy-chat-<id>` folder there, updated every 10 minutes when something changed: `account.backup` with your contacts, groups, settings and recent messages, and a sealed copy of each file of older messages. Every file is sealed with a key that comes from your secret key, so only your recovery words open it. After a restore, load the folder in the card or with `/buddy-backup load <folder>`; the older messages come back too. Backup is off until you set a folder. A folder that a cloud drive syncs works too.
 
 ## Security limits
 
@@ -169,7 +169,7 @@ The words do not hold contacts or messages. For those, set a backup folder in th
 - ntfy.sh gives each IP address 60 requests, then adds one request every 5 seconds. If buddy-chat gets HTTP 429, it waits one minute.
 - ntfy.sh keeps messages for 12 hours. buddy-chat sends unconfirmed messages again for up to 7 days, but only to friends on 0.10 or later. A message to an older version that opens no session in 12 hours is lost.
 - One message holds about 2,500 characters.
-- Claude Code's plugin store keeps the newest 300 messages. Older ones move to files under `~/.claude/buddy-chat/history/` in batches and come back when you scroll past the top of a chat. These files are not encrypted, and a linked device gets only the messages in the store.
+- Claude Code's plugin store keeps the newest 300 messages. Older ones move to files under `~/.claude/buddy-chat/history/` in batches and come back when you scroll past the top of a chat. These files are not encrypted; the backup holds sealed copies of them. A linked device gets only the messages in the store.
 - Each group message, edit and delete uses one request for each member.
 - Receipts and typing signals also use requests. buddy-chat sends one receipt for each batch of messages and one typing signal every 5 seconds at most. Groups have no typing indicator.
 - A delivered receipt goes out only while the recipient has Claude Code open.

@@ -1155,7 +1155,14 @@ function memoryFs(on: Parameters<typeof setup>[0], files: Map<string, string>) {
   })
   on('fs.list', (_, e) => {
     const dir = (e as { path: string }).path + '/'
-    return { value: [...files.keys()].filter(p => p.startsWith(dir)).map(p => ({ name: p.slice(dir.length), kind: 'file', size: 1, mtimeMs: 0, isLink: false })) } as never
+    const entries = new Map<string, string>()
+    for (const p of files.keys()) {
+      if (!p.startsWith(dir)) continue
+      const rest = p.slice(dir.length)
+      const slash = rest.indexOf('/')
+      entries.set(slash < 0 ? rest : rest.slice(0, slash), slash < 0 ? 'file' : 'dir')
+    }
+    return { value: [...entries].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 0, isLink: false })) } as never
   })
 }
 
@@ -1219,12 +1226,21 @@ test('backup: written sealed to the chosen folder, and loaded back after a resto
   await start($)
   const reply = await run($, 'buddy-backup', '~/Backups/buddy')
   expect(reply.text).toContain('/home/test/Backups/buddy/')
-  const [path, text] = [...files.entries()].find(([p]) => p.endsWith('.backup'))!
+  const [path, text] = [...files.entries()].find(([p]) => p.endsWith('account.backup'))!
   expect(text.includes('yedekteki mesaj')).toBe(false)
   const file = JSON.parse(text)
   const snap = JSON.parse(new TextDecoder().decode(nacl.secretbox.open(unb64(file.box), unb64(file.nonce), backupKey(mine.secretKey))!))
   expect(snap.contacts.map((c: { id: string }) => c.id)).toEqual([idOf(ahmet)])
   expect(path.startsWith('/home/test/Backups/buddy/buddy-chat-')).toBe(true)
+
+  // Archived history goes into the backup too, sealed, a file at a time.
+  const archived = [...files.keys()].find(p => p.includes('/.claude/buddy-chat/history/'))
+  expect(archived).toBeUndefined()
+  files.set('/home/test/.claude/buddy-chat/history/' + hex(nacl.hash(enc(idOf(mine)))).slice(0, 16) + '/c0nv/000000000001000-x.json', '[{"text":"arşivdeki"}]')
+  await run($, 'buddy-backup', 'now')
+  const copy = [...files.entries()].find(([p]) => p.includes('/history/c0nv/') && p.endsWith('.backup'))
+  expect(copy).toBeDefined()
+  expect(copy![1].includes('arşivdeki')).toBe(false)
 })
 
 test('backup: a restored identity loads its backup and stays the main device', async ($, on) => {
@@ -1240,14 +1256,19 @@ test('backup: a restored identity loads its backup and stays the main device', a
   }
   const nonce = nacl.randomBytes(24)
   const box = nacl.secretbox(enc(JSON.stringify(snap)), nonce, backupKey(mine.secretKey))
-  files.set('/home/test/old.backup', JSON.stringify({ v: 1, kind: 'buddy-chat-backup', id: idOf(mine), nonce: b64(nonce), box: b64(box) }))
+  files.set('/home/test/old/account.backup', JSON.stringify({ v: 1, kind: 'buddy-chat-backup', id: idOf(mine), nonce: b64(nonce), box: b64(box) }))
+  const hNonce = nacl.randomBytes(24)
+  const hBox = nacl.secretbox(enc('[{"text":"eski arşiv"}]'), hNonce, backupKey(mine.secretKey))
+  files.set('/home/test/old/history/c0nv/000000000001000-x.backup', JSON.stringify({ v: 1, kind: 'buddy-chat-backup', id: idOf(mine), nonce: b64(hNonce), box: b64(hBox) }))
   const w = setup(on, { ...V4, secretKey: b64(mine.secretKey) })
   await start($)
-  const reply = await run($, 'buddy-backup', 'load ~/old.backup')
+  const reply = await run($, 'buddy-backup', 'load ~/old')
+  expect(reply.text).toContain('1 dosyası')
+  expect([...files.entries()].find(([p]) => p.endsWith('/history/' + hex(nacl.hash(enc(idOf(mine)))).slice(0, 16) + '/c0nv/000000000001000-x.json'))?.[1]).toBe('[{"text":"eski arşiv"}]')
   expect(reply.text).toContain('Yedek yüklendi')
   expect(await list($)).toContain('Ahmet')
   expect(w.toasts.some(t => t.includes('geri geldi'))).toBe(false)
   const other = nacl.box.keyPair()
-  files.set('/home/test/other.backup', JSON.stringify({ v: 1, kind: 'buddy-chat-backup', id: idOf(other), nonce: b64(nonce), box: b64(box) }))
-  expect((await run($, 'buddy-backup', 'load ~/other.backup')).text).toContain('başka bir hesaba')
+  files.set('/home/test/other/account.backup', JSON.stringify({ v: 1, kind: 'buddy-chat-backup', id: idOf(other), nonce: b64(nonce), box: b64(box) }))
+  expect((await run($, 'buddy-backup', 'load ~/other')).text).toContain('başka bir hesaba')
 })

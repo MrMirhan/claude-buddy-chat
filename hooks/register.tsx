@@ -1109,25 +1109,60 @@ async function expandPath($: EngineInterface, path: string): Promise<string> {
   return home + p.slice(1)
 }
 
-const backupFile = (dir: string) => dir.replace(/\/+$/, '') + '/buddy-chat-' + hex(nacl.hash(encode(me))).slice(0, 12) + '.backup'
+// A backup is a folder: account.backup with the store's snapshot, and a sealed copy of each archived history file.
+const backupRoot = (dir: string) => dir.replace(/\/+$/, '') + '/buddy-chat-' + hex(nacl.hash(encode(me))).slice(0, 12)
 
-// The backup is the same snapshot a linked device gets, sealed with a key from the secret key.
+function sealBackup(text: string): string {
+  const nonce = nacl.randomBytes(24)
+  const box = nacl.secretbox(encode(text), nonce, backupKey(keys!.secretKey))
+  return JSON.stringify({ v: 1, kind: 'buddy-chat-backup', id: me, nonce: b64(nonce), box: b64(box) })
+}
+
+// Resolves to the text, 'other' for another account's file, or undefined when it does not open.
+function openBackup(text: string): string | 'other' | undefined {
+  let file: { kind?: string; id?: string; nonce?: string; box?: string }
+  try { file = JSON.parse(text) } catch { return undefined }
+  if (file?.kind !== 'buddy-chat-backup' || typeof file.nonce !== 'string' || typeof file.box !== 'string') return undefined
+  if (file.id !== me) return 'other'
+  let plain: Uint8Array | null = null
+  try { plain = nacl.secretbox.open(unb64(file.box), unb64(file.nonce), backupKey(keys!.secretKey)) } catch { plain = null }
+  return plain ? new TextDecoder().decode(plain) : undefined
+}
+
+const dirsIn = async ($: EngineInterface, path: string) => {
+  try { return (await $.fs.list(path)).filter(e => e.kind === 'dir').map(e => e.name) } catch { return [] }
+}
+const filesIn = async ($: EngineInterface, path: string, ext: string) => {
+  try { return (await $.fs.list(path)).filter(e => e.kind === 'file' && e.name.endsWith(ext)).map(e => e.name) } catch { return [] }
+}
+
 async function writeBackup($: EngineInterface): Promise<string> {
   const dir = await $.store.get('backupDir')
   if (typeof dir !== 'string' || !dir) return t('backupOff')
+  const root = backupRoot(dir)
   const snapshot = {
     v: 1, secretKey: await $.store.get('secretKey'), kemSeed: await $.store.get('kemSeed'), recovery: await $.store.get('recovery'),
     lastSeen: await $.store.get('lastSeen'), lang, ...currentState(), inbox: [...inbox],
   }
-  const nonce = nacl.randomBytes(24)
-  const box = nacl.secretbox(encode(JSON.stringify(snapshot)), nonce, backupKey(keys!.secretKey))
   try {
-    await $.fs.write(backupFile(dir), JSON.stringify({ v: 1, kind: 'buddy-chat-backup', id: me, nonce: b64(nonce), box: b64(box) }))
+    await $.fs.write(root + '/account.backup', sealBackup(JSON.stringify(snapshot)))
+    // Archived files never change, so only the ones the backup does not have yet are copied.
+    const history = await historyDir($)
+    if (history) {
+      for (const conv of await dirsIn($, history)) {
+        const have = new Set(await filesIn($, root + '/history/' + conv, '.backup'))
+        for (const name of await filesIn($, history + '/' + conv, '.json')) {
+          const target = name.replace(/\.json$/, '.backup')
+          if (have.has(target)) continue
+          await $.fs.write(root + '/history/' + conv + '/' + target, sealBackup(await $.fs.read(history + '/' + conv + '/' + name)))
+        }
+      }
+    }
   } catch (err) {
     return t('backupFailed', { error: String(err) })
   }
   await $.store.set('backupAt', await $.clock.now())
-  return t('backupWritten', { path: backupFile(dir) })
+  return t('backupWritten', { path: root })
 }
 
 async function setBackupDir($: EngineInterface, path: string): Promise<string> {
@@ -1153,17 +1188,39 @@ async function backupIfDue($: EngineInterface, now: number) {
   await writeBackup($)
 }
 
+// Takes the backup folder, its account.backup, or the folder it was written into.
 async function loadBackup($: EngineInterface, path: string): Promise<string> {
-  let file: { v?: number; kind?: string; id?: string; nonce?: string; box?: string }
-  try { file = JSON.parse(await $.fs.read(await expandPath($, path))) } catch { return t('backupUnreadable') }
-  if (file?.kind !== 'buddy-chat-backup' || typeof file.nonce !== 'string' || typeof file.box !== 'string') return t('backupUnreadable')
-  if (file.id !== me) return t('backupOtherAccount')
-  let plain: Uint8Array | null = null
-  try { plain = nacl.secretbox.open(unb64(file.box), unb64(file.nonce), backupKey(keys!.secretKey)) } catch { plain = null }
-  if (!plain) return t('backupUnreadable')
+  const given = (await expandPath($, path)).replace(/\/+$/, '')
+  const roots = given.endsWith('.backup') ? [given.slice(0, given.lastIndexOf('/'))] : [given, backupRoot(given)]
+  let root = ''
+  let text: string | 'other' | undefined
+  for (const candidate of roots) {
+    try { text = openBackup(await $.fs.read(candidate + '/account.backup')) } catch { continue }
+    root = candidate
+    break
+  }
+  if (text === 'other') return t('backupOtherAccount')
+  if (!text) return t('backupUnreadable')
   let snapshot: unknown
-  try { snapshot = JSON.parse(new TextDecoder().decode(plain)) } catch { return t('backupUnreadable') }
-  return (await applySnapshot($, snapshot, true)) ? t('backupLoaded') : t('backupUnreadable')
+  try { snapshot = JSON.parse(text) } catch { return t('backupUnreadable') }
+  if (!(await applySnapshot($, snapshot, true))) return t('backupUnreadable')
+
+  const history = await historyDir($)
+  let restored = 0
+  if (history) {
+    for (const conv of await dirsIn($, root + '/history')) {
+      for (const name of await filesIn($, root + '/history/' + conv, '.backup')) {
+        let plain: string | 'other' | undefined
+        try { plain = openBackup(await $.fs.read(root + '/history/' + conv + '/' + name)) } catch { continue }
+        if (!plain || plain === 'other') continue
+        await $.fs.write(history + '/' + conv + '/' + name.replace(/\.backup$/, '.json'), plain)
+        restored++
+      }
+    }
+  }
+  forgetHistory()
+  $.ui.invalidate('ui.render')
+  return t('backupLoaded') + (restored ? ' ' + t('backupHistoryLoaded', { count: restored }) : '')
 }
 
 const isOnScreen = (conv: string) => threadOpen && selected === conv
@@ -2816,7 +2873,7 @@ export const register: Register = on => {
       const sameRun = !!prev && !newDay && !prev.system && !m.system && prev.from === m.from && m.at - prev.at < 5 * 60_000
       // Desktop draws text taller than a row, and a bubble adds its frame, its time line and a gap.
       if (graphic) {
-        return (newDay ? 2.5 : 0) + (m.system ? 1.2 : linesOf(textOf(m)) * 1.4 + (sameRun ? 2 : 2.8))
+        return (newDay ? 2.5 : 0) + (m.system ? 1.2 : linesOf(textOf(m)) * 1.4 + (sameRun ? 3 : 3.5))
           + (!m.mine && !m.system && !!group && !sameRun ? 1.2 : 0)
       }
       // An incoming message's quote bar adds a blank row above and below it.
@@ -2947,10 +3004,10 @@ export const register: Register = on => {
       const name = nameOf(m.from, m.name)
 
       if (graphic) {
-        // Desktop: chat bubbles with their actions beside the time; in groups other people's messages carry an avatar and a name.
+        // Desktop: chat bubbles with a row for their actions underneath; in groups other people's messages carry an avatar and a name.
         const showFace = !m.mine && !!group
         return (
-          <Box key={'msg-' + m.key} flexDirection="column" alignItems={m.mine ? 'flex-end' : 'flex-start'} marginTop={sameRun ? 'xs' : 'md'}>
+          <Box key={'msg-' + m.key} flexDirection="column" alignItems={m.mine ? 'flex-end' : 'flex-start'} marginTop={sameRun ? 0 : 'sm'}>
             {day}
             {showFace && !sameRun && (
               <Box paddingLeft={5}><Text size="caption" weight="semibold" color={color}>{name}</Text></Box>
@@ -2963,9 +3020,7 @@ export const register: Register = on => {
                 {m.deleted
                   ? <Text italic color={m.mine ? MINE_SOFT : undefined} dimColor={!m.mine}>{t('deletedMsg')}</Text>
                   : <Text wrap="wrap" color={m.mine ? '#ffffff' : undefined}>{m.text}</Text>}
-                {/* The actions share the time's row and always show, so nothing moves on hover. */}
                 <Box flexDirection="row" justifyContent="flex-end" alignItems="center" columnGap={1}>
-                  <Box flexDirection="row" flexGrow={1}>{msgActions(m, true)}</Box>
                   <Text size="caption" color={m.mine ? MINE_SOFT : undefined} dimColor={!m.mine}>
                     {(m.edited ? t('editedShort') + ' · ' : '') + clock(m.at)}
                   </Text>
@@ -2973,6 +3028,10 @@ export const register: Register = on => {
                 </Box>
               </Box>
               {!m.mine && m.forwarded && <Text dimColor size="caption">{t('forwarded')}</Text>}
+            </Box>
+            {/* A row of fixed height is always there under the bubble; the actions fill it on hover, so nothing moves. */}
+            <Box height={1} flexDirection="row" paddingLeft={showFace ? 5 : 1} paddingRight={1}>
+              <Box display="none" hover={{ display: 'flex' }} flexDirection="row">{msgActions(m, true)}</Box>
             </Box>
           </Box>
         )
