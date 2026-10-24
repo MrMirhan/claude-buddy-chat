@@ -77,7 +77,7 @@ The pane is the same on every surface. Each app draws it in its own style.
 
 - `✎` edits your message. `✕` deletes it for everyone.
 - `↗` sends an incoming message to Claude, with a note that it comes from your friend and not from you.
-- A chat fills the pane and opens at its newest message. The list and the chat header stay in place, and the text field stays at the bottom. Select **older messages** and **newer messages** to page through the chat.
+- A chat fills the pane and opens at its newest message. The list and the chat header stay in place, and the text field stays at the bottom. Select **older messages** and **newer messages** to page through the chat. On Desktop, `k` and `j` do the same while the pane has the focus. The Desktop app does not pass the mouse wheel to mods, so the wheel does not move a chat.
 - `s` opens **Chats** and `p` opens **People**.
 
 ## Commands

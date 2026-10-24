@@ -1075,8 +1075,8 @@ export const register: Register = on => {
     return { result: (await sendText($, conv.id, text)).text }
   })
 
-  // The chat is drawn one row taller than the pane, so the wheel, the arrows and the page keys raise ui.scroll.
-  // The pane is held at the top and the scroll moves the messages instead: a wheel notch or an arrow by one, a page key by a page.
+  // In the terminal the chat is drawn one row taller than the pane, so the arrows and the page keys raise ui.scroll.
+  // The pane is held at the top and the scroll moves the messages instead: an arrow by one, a page key by a page.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
     if (!chatShown || e.by === 0) return next(e)
     const step = Math.min(PAGE_STEP, Math.max(1, Math.round(Math.abs(e.by))))
@@ -1584,7 +1584,8 @@ export const register: Register = on => {
       start--
     }
     hiddenAbove = start
-    const drawFrom = graphic ? Math.max(0, start - 2) : start
+    // Desktop overdraws by a page so a low estimate never leaves a gap; the window clips the extra at the top.
+    const drawFrom = graphic ? Math.max(0, start - PAGE_STEP) : start
     const visible = thread.slice(drawFrom, end)
     const below = thread.length - end
     // At the start of the chat the messages hang from the top, so going back never opens a gap above them.
@@ -1592,15 +1593,17 @@ export const register: Register = on => {
     chatShown = view === 'chats' && (!graphic || threadOpen)
     const olderButton = start > 0 && (
       <Box justifyContent="center">
-        <Button key="older" label={t('olderMessages', { count: start })} plain dimColor
-          hotkey={graphic ? undefined : 'o'} onPress={() => pageBy($, PAGE_STEP)} />
+        <Button key="older" label={graphic ? t('olderPage') : t('olderMessages', { count: start })} plain dimColor
+          hotkey={graphic ? 'k' : 'o'} onPress={() => pageBy($, PAGE_STEP)} />
       </Box>
     )
-    // The pane is held at offset 0, so this row is never seen; it only lets the pane scroll by one row.
-    const scrollRow = fullHeight ? <Box key="scroll-row" height={1} /> : null
+    // Terminal: the pane is held at offset 0, so this row is never seen; it only lets the arrows and page keys raise ui.scroll.
+    // Desktop scrolls a pane itself without telling the mod, so it gets no such row.
+    const scrollRow = fullHeight && !graphic ? <Box key="scroll-row" height={1} /> : null
     const newerButton = below > 0 && (
       <Box justifyContent="center">
-        <Button key="newer" label={t('newerMessages', { count: below })} plain dimColor onPress={() => pageBy($, -PAGE_STEP)} />
+        <Button key="newer" label={t('newerMessages', { count: below })} plain dimColor hotkey={graphic ? 'j' : undefined}
+          onPress={() => pageBy($, -PAGE_STEP)} />
       </Box>
     )
     const securityLine = group

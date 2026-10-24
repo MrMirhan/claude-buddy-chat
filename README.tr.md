@@ -77,7 +77,7 @@ Panel her yüzeyde aynı, ama her uygulama kendi görünümüyle çizer.
 
 - `✎` mesajını düzenler, `✕` herkesten siler.
 - `↗` gelen mesajı Claude'a iletir; mesajın senden değil arkadaşından geldiği notuyla.
-- Sohbet paneli doldurur ve en yeni mesajında açılır. Liste ve sohbet başlığı yerinde kalır, yazı alanı hep en altta. **Eski mesajlar** ve **yeni mesaj** butonlarıyla sohbette sayfa sayfa gezilir.
+- Sohbet paneli doldurur ve en yeni mesajında açılır. Liste ve sohbet başlığı yerinde kalır, yazı alanı hep en altta. **Eski mesajlar** ve **yeni mesaj** butonlarıyla sohbette sayfa sayfa gezilir. Desktop'ta panel odaktayken `k` ve `j` de aynı işi yapar. Desktop uygulaması fare tekerleğini mod'lara iletmediği için tekerlek sohbeti kaydırmaz.
 - `s` **Sohbetler**'i, `p` **Kişiler**'i açar.
 
 ## Komutlar
