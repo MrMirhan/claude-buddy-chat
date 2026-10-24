@@ -506,7 +506,7 @@ test('onboarding: name form until a name is saved, then a summary with Edit; ste
   expect(w.posts.length).toBe(0)
 })
 
-test('a wide desktop pane shows the chat list and the open chat side by side', async ($, on) => {
+test('a wide desktop pane: list beside home, a chat opens beside the list, sending clears the field, closing returns home', async ($, on) => {
   const ahmet = nacl.box.keyPair()
   const veli = nacl.box.keyPair()
   const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet'), friend(veli, 'Veli')] })
@@ -516,13 +516,20 @@ test('a wide desktop pane shows the chat list and the open chat side by side', a
 
   const wide = { ...pane('desktop'), props: { ...pane('desktop').props, bodyColumns: 140 } }
   const ui = await $.ui.mount(wide)
-  expect(await ui.find({ key: 'conv-dm:' + idOf(veli) })).not.toBeUndefined()
-  expect(await ui.find({ key: 'compose-dm:' + idOf(ahmet) })).not.toBeUndefined()
-  expect(await ui.find({ key: 'back' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^geniş ekran mesajı$/ })).not.toBeUndefined()
-
-  await ui.press({ key: 'conv-dm:' + idOf(veli) })
-  expect(await ui.find({ key: 'compose-dm:' + idOf(veli) })).not.toBeUndefined()
   expect(await ui.find({ key: 'conv-dm:' + idOf(ahmet) })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
+  expect(await ui.find({ key: 'compose-dm:' + idOf(ahmet) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^1$/ })).not.toBeUndefined()
+
+  await ui.press({ key: 'conv-dm:' + idOf(ahmet) })
+  expect(await ui.find({ type: 'Text', text: /^geniş ekran mesajı$/ })).not.toBeUndefined()
+  expect(await ui.find({ key: 'conv-dm:' + idOf(veli) })).not.toBeUndefined()
+  await ui.input({ key: 'compose-dm:' + idOf(ahmet), text: 'cevap' })
+  expect(await ui.find({ key: 'compose-dm:' + idOf(ahmet) })).toBeUndefined()
+  expect(await ui.find({ key: 'compose-dm:' + idOf(ahmet) + '-1' })).not.toBeUndefined()
+
+  await ui.press({ key: 'back' })
+  expect(await ui.find({ type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^1$/ })).toBeUndefined()
   await ui.unmount()
 })

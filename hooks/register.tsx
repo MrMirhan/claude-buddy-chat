@@ -71,7 +71,8 @@ type Payload =
 type Status = { state: 'ok' | 'limited' | 'error'; at: number }
 type Conv = { id: string; title: string; isGroup: boolean; last: number; unread: number }
 type PostError = { code: 'tooLong' | 'limited' | 'http' | 'net'; detail: string }
-type Outcome = { ok: boolean; text: string }
+// sent: the message went out to at least one person, so the text field can be cleared.
+type Outcome = { ok: boolean; text: string; sent?: boolean }
 
 let keys: { publicKey: Uint8Array; secretKey: Uint8Array } | undefined
 let kemKeys: { publicKey: Uint8Array; secretKey: Uint8Array } | undefined
@@ -90,6 +91,11 @@ let renaming = ''
 let threadOpen = false
 let editingProfile = false
 let filter = ''
+// Bumped after a send so the text field is drawn fresh and empty; a field keeps what was typed while its value stays the same.
+let composeSeq = 0
+let addSeq = 0
+let groupSeq = 0
+let pollerAt = 0
 let lineCopied = false
 let editing = ''
 let session = ''
@@ -430,6 +436,7 @@ async function refresh($: EngineInterface) {
   const savedRead = await $.store.get('readAt')
   readAt = savedRead && typeof savedRead === 'object' ? (savedRead as Record<string, number>) : {}
   status = (await $.store.get('status')) as Status | undefined
+  pollerAt = ((await $.store.get('poller')) as { at?: number } | undefined)?.at ?? 0
   if (selected && !conversations().some(c => c.id === selected)) selected = ''
 
   for (const m of inbox) {
@@ -581,7 +588,7 @@ function conversations(): Conv[] {
   const last = new Map<string, number>()
   for (const m of inbox) last.set(m.conv, Math.max(last.get(m.conv) ?? 0, m.at))
   const unread = (conv: string) =>
-    conv === selected ? 0 : inbox.filter(m => m.conv === conv && !m.mine && !m.system && !m.deleted && m.at > (readAt[conv] ?? 0)).length
+    conv === selected && threadOpen ? 0 : inbox.filter(m => m.conv === conv && !m.mine && !m.system && !m.deleted && m.at > (readAt[conv] ?? 0)).length
   return [
     ...friends().map(f => ({ id: convOf(f.id), title: nameOf(f.id), isGroup: false })),
     ...groups.map(g => ({ id: groupConv(g.id), title: g.title, isGroup: true })),
@@ -623,7 +630,7 @@ async function sendText($: EngineInterface, conv: string, text: string): Promise
   shown.add(id)
   await addMessages($, [{ key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true }])
   $.ui.invalidate('ui.render')
-  return result.missed.length ? { ok: false, text: partialText(result.missed) } : { ok: true, text: t('sent') }
+  return result.missed.length ? { ok: false, text: partialText(result.missed), sent: true } : { ok: true, text: t('sent'), sent: true }
 }
 
 async function editMessage($: EngineInterface, msg: Msg, text: string): Promise<Outcome> {
@@ -793,6 +800,16 @@ async function select($: EngineInterface, conv: string) {
   $.ui.invalidate('ui.render')
 }
 
+async function closeThread($: EngineInterface) {
+  if (selected) {
+    readAt = { ...readAt, [selected]: await $.clock.now() }
+    await $.store.set('readAt', readAt)
+  }
+  threadOpen = false
+  editing = ''
+  $.ui.invalidate('ui.render')
+}
+
 async function migrate($: EngineInterface) {
   const version = await $.store.get('version')
   if (version === STORE_VERSION) return
@@ -921,6 +938,7 @@ export const register: Register = on => {
     selected = editing = renaming = ''
     threadOpen = false
     editingProfile = false
+    filter = ''
     await migrate($)
     await loadIdentity($)
     await refresh($)
@@ -1045,7 +1063,7 @@ export const register: Register = on => {
     const cols = Math.max(20, e.props.bodyColumns)
     const rows = e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 24
     const now = await $.clock.now()
-    if (!selected) selected = conversations()[0]?.id ?? ''
+    if (!selected && !graphic) selected = conversations()[0]?.id ?? ''
     const convs = conversations()
     const incoming = contacts.filter(c => c.state === 'incoming')
     const outgoing = contacts.filter(c => c.state === 'outgoing')
@@ -1069,7 +1087,7 @@ export const register: Register = on => {
         : <Text weight="bold" color={color ?? 'claude'}>{title}{count !== undefined ? ' (' + count + ')' : ''}</Text>
 
     const statusView =
-      status?.state === 'ok' && now - status.at < POLLER_STALE_MS * 4
+      status?.state === 'ok' && now - pollerAt < POLLER_STALE_MS * 2
         ? <Text color="success" size="caption">{t('statusOk')}</Text>
         : status?.state === 'limited'
           ? <Text color="warning" size="caption">{t('statusLimited')}</Text>
@@ -1098,10 +1116,13 @@ export const register: Register = on => {
 
     // Fields carry no side label: labels of different lengths left the boxes out of line.
     const addInput = Input
-      ? <Input key="add-contact" placeholder={t('addContactPlaceholder')} value="" submitLabel={t('addSubmit')}
+      ? <Input key={'add-contact' + (addSeq ? '-' + addSeq : '')} placeholder={t('addContactPlaceholder')} value="" submitLabel={t('addSubmit')}
           onSubmit={async (value: string) => {
             const parsed = parseAddLine(value)
-            toast(parsed ? await addContact($, parsed.id, parsed.nickname) : t('addLineUnknown'))
+            if (!parsed) return toast(t('addLineUnknown'))
+            toast(await addContact($, parsed.id, parsed.nickname))
+            addSeq++
+            redraw()
           }} />
       : <Text dimColor>{t('addHintNoInput')}</Text>
 
@@ -1327,8 +1348,9 @@ export const register: Register = on => {
                 ))}
               </Box>
               {Input
-                ? <Input key="group-title" label={t('groupTitleLabel')} placeholder={t('groupTitlePlaceholder')} value="" submitLabel={t('create')}
-                    onSubmit={async (value: string) => toast(await createGroup($, value, [...groupPick]))} />
+                ? <Input key={'group-title' + (groupSeq ? '-' + groupSeq : '')} label={t('groupTitleLabel')} placeholder={t('groupTitlePlaceholder')}
+                    value="" submitLabel={t('create')}
+                    onSubmit={async (value: string) => { toast(await createGroup($, value, [...groupPick])); groupSeq++; redraw() }} />
                 : <Text dimColor>{t('groupHintNoInput')}</Text>}
             </Box>
           )}
@@ -1403,7 +1425,7 @@ export const register: Register = on => {
           {avatar(c.id, c.isGroup ? '#' : c.title, convColor(c), 40)}
           <Box flexDirection="column" flexGrow={1} flexShrink={1}>
             <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
-              <Button key={'conv-' + c.id} plain hotkey={i < 9 ? String(i + 1) : undefined} onPress={() => select($, c.id)}>
+              <Button key={'conv-' + c.id} plain onPress={() => select($, c.id)}>
                 <Text weight="semibold">{(c.isGroup ? '# ' : '') + c.title}</Text>
               </Button>
               <Text dimColor={c.unread === 0} color={c.unread > 0 ? ACCENT : undefined} size="caption">{last ? shortWhen(last.at, now) : ''}</Text>
@@ -1444,7 +1466,30 @@ export const register: Register = on => {
       </Box>
     )
 
-    if (graphic && !split && !threadOpen) return sidebar
+    // With no chat open, the right side is home: your Buddy ID, adding a friend, requests.
+    const home = (
+      <Box key="home" flexDirection="column" flexGrow={1} flexShrink={1} rowGap={1} paddingLeft={split ? 2 : 0}>
+        <Text size="title" weight="bold">Buddy chat</Text>
+        {incoming.length > 0 && (
+          <Button key="home-requests" label={t('requestsButton', { count: incoming.length })} variant="primary"
+            onPress={() => { view = 'people'; redraw() }} />
+        )}
+        {card('me-card', profileBlock, shareRow, 'claude')}
+        {card('add-card', <Text weight="semibold">{t('addContactLabel')}</Text>, addInput)}
+        {footer}
+      </Box>
+    )
+
+    if (graphic && !threadOpen) {
+      if (!split) return sidebar
+      return (
+        <Box flexDirection="row" columnGap={1}>
+          {sidebar}
+          {home}
+        </Box>
+      )
+    }
+
 
     const group = current.isGroup ? groups.find(g => groupConv(g.id) === current.id) : undefined
     const peer = current.isGroup ? undefined : contactOf(current.id.slice(3))
@@ -1522,7 +1567,7 @@ export const register: Register = on => {
         // Desktop: chat bubbles; actions show on hover; in groups other people's messages carry an avatar and a name.
         const showFace = !m.mine && !!group
         return (
-          <Box key={'msg-' + m.key} flexDirection="column" alignItems={m.mine ? 'flex-end' : 'flex-start'} marginTop={sameRun ? 0 : 1}>
+          <Box key={'msg-' + m.key} flexDirection="column" alignItems={m.mine ? 'flex-end' : 'flex-start'} marginTop={sameRun ? 'xs' : 'md'}>
             {day}
             {showFace && !sameRun && (
               <Box paddingLeft={5}><Text size="caption" weight="semibold" color={color}>{name}</Text></Box>
@@ -1582,18 +1627,23 @@ export const register: Register = on => {
             <Button key="edit-cancel" label={t('stopEditing')} plain dimColor onPress={() => { editing = ''; redraw() }} />
           </Box>
         )
-        : <Input key={'compose-' + current.id} label={graphic ? undefined : '→ ' + (current.isGroup ? '# ' : '') + current.title}
+        : <Input key={'compose-' + current.id + (composeSeq ? '-' + composeSeq : '')}
+            label={graphic ? undefined : '→ ' + (current.isGroup ? '# ' : '') + current.title}
             placeholder={t('composePlaceholder', { title: (current.isGroup ? '# ' : '') + current.title })} value="" submitLabel={t('send')} autoFocus
             onSubmit={async (value: string) => {
               const r = await sendText($, current.id, value)
               if (!r.ok) toast(r.text)
+              if (r.sent) {
+                composeSeq++
+                redraw()
+              }
             }} />
 
     if (graphic) {
       const threadPane = (
         <Box key="thread" flexDirection="column" flexGrow={1} flexShrink={1} paddingLeft={split ? 2 : 0}>
           <Box flexDirection="row" columnGap={1} alignItems="center" paddingBottom={1}>
-            {!split && <Button key="back" label="←" plain hotkey="b" onPress={() => { threadOpen = false; editing = ''; redraw() }} />}
+            <Button key="back" label="←" plain hotkey="b" onPress={() => closeThread($)} />
             {avatar('head-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 40)}
             <Box flexDirection="column" flexGrow={1} flexShrink={1}>
               <Text size="heading" weight="semibold" wrap="truncate-end">{(current.isGroup ? '# ' : '') + current.title}</Text>
@@ -1610,8 +1660,8 @@ export const register: Register = on => {
               <Text dimColor>{t('sayHi')}</Text>
             </Box>
           )}
-          <Box flexDirection="column">{rowsView}</Box>
-          <Box marginTop={1}>{composer}</Box>
+          <Box flexDirection="column" flexGrow={1}>{rowsView}</Box>
+          <Box flexDirection="column" alignItems="stretch" width="100%" marginTop={1}>{composer}</Box>
         </Box>
       )
       if (!split) return threadPane
