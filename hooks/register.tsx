@@ -228,8 +228,6 @@ const PAGE_STEP = 8
 // restOffset is that row (0 in the terminal, which has only the row below); restedFor, the chat already put there.
 let restOffset = 0
 let restedFor = ''
-let restQueued = false
-let restTries = 0
 // Desktop: the wheel is summed in rows and the window moves a message once the rows add up to one, so a long
 // message takes more wheel than a short one, as in a scrolled page. avgRows: the rows a message on screen takes.
 let wheelRows = 0
@@ -3373,11 +3371,9 @@ export const register: Register = on => {
     }
 
     if (graphic) {
-      // At the top the wheel cannot go up and raises nothing, so the pane goes back to its rest row whenever a
-      // drawing finds it elsewhere: a chat just opened, the pane shown again, a resize. A few tries per chat at most.
+      // At the top the wheel cannot go up and raises nothing, so a chat just opened is moved off the top once.
       if (restedFor !== current.id) {
         restedFor = current.id
-        restTries = 0
         // Desktop may not have laid the chat out yet when the first try goes, so a few more follow.
         // Desktop may skip a move to a key; a move to the end it makes, and from the end the wheel can go up at once.
         if (fullHeight && e.surface === 'desktop') {
@@ -3385,16 +3381,6 @@ export const register: Register = on => {
           for (const ms of [300, 800]) $.clock.after(ms, () => scrollToRest($))
         }
       }
-      if (e.props.scroll?.offset === restOffset) restTries = 0
-      if (fullHeight && e.surface === 'desktop' && e.props.scroll?.offset !== restOffset && !restQueued && restTries < 5) {
-        restQueued = true
-        restTries++
-        $.clock.after(60, () => {
-          restQueued = false
-          scrollToRest($)
-        })
-      }
-
       return (
         <Box flexDirection="column">
           {scrollRowTop}
