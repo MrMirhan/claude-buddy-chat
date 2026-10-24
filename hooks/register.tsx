@@ -1754,7 +1754,10 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'buddy-link' }, async ($, e) => {
-    return { text: e.args.trim() ? await sendLink($, e.args) : await startLink($) }
+    if (e.args.trim()) return { text: await sendLink($, e.args) }
+    // A device that already has contacts is the one that takes a code, not the one that makes it.
+    if (contacts.length) return { text: t('linkHowTo') }
+    return { text: await startLink($) }
   })
 
   on('command.run', { command: 'buddy-list' }, async () => {

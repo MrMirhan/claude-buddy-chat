@@ -1013,3 +1013,12 @@ test('linked devices: sent copies, missed-message requests and state from the pr
   const answers = w.posts.filter(p => p.url === topicOf(me)).map(p => opened(p, mine)).filter(p => p?.t === 'self')
   expect(answers.some(p => p.kind === 'have' || p.kind === 'part')).toBe(true)
 })
+
+test('a bare /buddy-link on a device with contacts explains the steps instead of starting over', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  await start($)
+  const reply = await run($, 'buddy-link')
+  expect(reply.text).toContain('kodu bu cihaz alır')
+  expect(w.posts.some(p => p.url.includes('buddy-chat-link-'))).toBe(false)
+})
