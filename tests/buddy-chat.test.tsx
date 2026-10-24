@@ -1297,3 +1297,18 @@ test('backup: the folder comes from the system dialog; without one a path field 
   expect(await ui.find({ key: 'backup-path' })).toBeDefined()
   await ui.unmount()
 })
+
+test('no toast while the pane is shown; one when it is not', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  let shownPane = true
+  on('ui.panes', () => ({ value: [{ id: 'buddy-chat', title: 'Buddy chat', isShown: shownPane, isFocused: false }] }) as never)
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  const me = await start($)
+  w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'd4d4d4d4d4d4d4d1', name: 'A', text: 'pane açık' }))
+  await w.clock.advance(8000)
+  expect(w.toasts.some(t => t.includes('pane açık'))).toBe(false)
+  shownPane = false
+  w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'd4d4d4d4d4d4d4d2', name: 'A', text: 'pane kapalı' }))
+  await w.clock.advance(8000)
+  expect(w.toasts.some(t => t.includes('pane kapalı'))).toBe(true)
+})

@@ -1488,18 +1488,23 @@ async function refresh($: EngineInterface, quiet = false) {
   pollerAt = ((await $.store.get('poller')) as { at?: number } | undefined)?.at ?? 0
   if (selected && !conversations().some(c => c.id === selected)) selected = ''
 
+  // An open pane already shows new messages and requests; a toast would only cover its composer.
+  let paneShown = false
+  if (!quiet) {
+    try { paneShown = (await $.ui.panes()).some(p => p.id === PANE && p.isShown) } catch { paneShown = false }
+  }
   for (const m of inbox) {
     if (shown.has(m.key)) continue
     shown.add(m.key)
     // A toast over an open chat would cover its composer and repeat what is already on screen.
-    if (quiet || m.mine || m.deleted || !privacy.notifications || muted.includes(m.conv) || isOnScreen(m.conv)) continue
+    if (quiet || paneShown || m.mine || m.deleted || !privacy.notifications || muted.includes(m.conv) || isOnScreen(m.conv)) continue
     const group = groups.find(g => groupConv(g.id) === m.conv)
     $.ui.toast((group ? group.title + ' · ' : '') + (m.system ? textOf(m) : nameOf(m.from, m.name) + ': ' + m.text).slice(0, 90))
   }
   for (const c of contacts) {
     if (c.state !== 'incoming' || shown.has('req:' + c.id)) continue
     shown.add('req:' + c.id)
-    if (!quiet && privacy.notifications) $.ui.toast(t('notifyWantsToAdd', { name: ownName(c.profile) || shortId(c.id) }))
+    if (!quiet && !paneShown && privacy.notifications) $.ui.toast(t('notifyWantsToAdd', { name: ownName(c.profile) || shortId(c.id) }))
   }
   for (const n of asArray<Notice>(await $.store.get('notices'))) {
     if (shown.has('notice:' + n.key)) continue
@@ -2907,7 +2912,7 @@ export const register: Register = on => {
       const sameRun = !!prev && !newDay && !prev.system && !m.system && prev.from === m.from && m.at - prev.at < 5 * 60_000
       // Desktop draws text taller than a row, and a bubble adds its frame, its time line and a gap.
       if (graphic) {
-        return (newDay ? 2.5 : 0) + (m.system ? 1.2 : linesOf(textOf(m)) * 1.4 + (sameRun ? 3 : 3.5))
+        return (newDay ? 2.5 : 0) + (m.system ? 1.2 : linesOf(textOf(m)) * 1.4 + (sameRun ? 3.3 : 4))
           + (!m.mine && !m.system && !!group && !sameRun ? 1.2 : 0)
       }
       // An incoming message's quote bar adds a blank row above and below it.
@@ -2923,6 +2928,13 @@ export const register: Register = on => {
       if (used + rowsNeeded > room && start < end) break
       used += rowsNeeded
       start--
+    }
+    // Desktop's rows are guesses: a few more messages than they allow keep the top from opening a gap; the list clips them.
+    if (graphic) {
+      for (let extra = 0; extra < 6 && start > 0; extra++) {
+        used += rowsOf(thread[start - 1]!, thread[start - 2])
+        start--
+      }
     }
     hiddenAbove = start
     const visible = thread.slice(start, end)
@@ -3041,7 +3053,7 @@ export const register: Register = on => {
         // Desktop: chat bubbles with a row for their actions underneath; in groups other people's messages carry an avatar and a name.
         const showFace = !m.mine && !!group
         return (
-          <Box key={'msg-' + m.key} flexDirection="column" alignItems={m.mine ? 'flex-end' : 'flex-start'} marginTop={sameRun ? 0 : 'sm'}>
+          <Box key={'msg-' + m.key} flexDirection="column" alignItems={m.mine ? 'flex-end' : 'flex-start'} marginTop={sameRun ? 'xs' : 'md'}>
             {day}
             {showFace && !sameRun && (
               <Box paddingLeft={5}><Text size="caption" weight="semibold" color={color}>{name}</Text></Box>
