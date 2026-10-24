@@ -51,7 +51,9 @@ const USERNAME_RE = /^[a-z0-9_.]{2,24}$/
 type Profile = { username: string; displayName: string }
 // Off means neither side's: with read receipts off you send none and see none, as in WhatsApp.
 // notifications covers toasts and OS notifications; a muted chat is silenced on its own.
-type Privacy = { readReceipts: boolean; typing: boolean; notifications: boolean }
+// sound: 'auto' plays our chime only when the notification made no sound of its own (not sent, as in the desktop app).
+type Sound = 'auto' | 'on' | 'off'
+type Privacy = { readReceipts: boolean; typing: boolean; notifications: boolean; sound: Sound }
 type Typing = { conv: string; from: string; until: number }
 type ReceiptKind = 'delivered' | 'read'
 type Contact = {
@@ -154,7 +156,7 @@ let groups: Group[] = []
 let inbox: Msg[] = []
 let readAt: Record<string, number> = {}
 let status: Status | undefined
-let privacy: Privacy = { readReceipts: true, typing: true, notifications: true }
+let privacy: Privacy = { readReceipts: true, typing: true, notifications: true, sound: 'auto' }
 let muted: string[] = []
 // Device linking. deviceId stays on this machine; primary: the device the identity was made on, the one that runs
 // ML-KEM encapsulation, since two devices encapsulating would agree on two different keys.
@@ -691,7 +693,7 @@ async function mergeState($: EngineInterface, st: SyncState, fromPrimary: boolea
     await $.store.set('muted', muted)
   }
   if ((at.privacy ?? 0) > stateAt.privacy && st.privacy && typeof st.privacy === 'object') {
-    privacy = { readReceipts: st.privacy.readReceipts !== false, typing: st.privacy.typing !== false, notifications: st.privacy.notifications !== false }
+    privacy = cleanPrivacy(st.privacy)
     await $.store.set('privacy', privacy)
   }
   stateAt = {
@@ -950,7 +952,7 @@ async function applySnapshot($: EngineInterface, value: unknown): Promise<boolea
   const p = cleanProfile(snap.profile)
   await $.store.set('profile', p)
   await $.store.set('profileSent', JSON.stringify(p))
-  if (snap.privacy && typeof snap.privacy === 'object') await $.store.set('privacy', snap.privacy)
+  if (snap.privacy && typeof snap.privacy === 'object') await $.store.set('privacy', cleanPrivacy(snap.privacy))
   await $.store.set('stateAt', { blocked: 0, profile: 0, muted: 0, privacy: 0, ...numberMap(snap.at) })
   if (isLang(snap.lang)) await $.store.set('lang', snap.lang)
   if (typeof snap.lastSeen === 'string') await $.store.set('lastSeen', snap.lastSeen)
@@ -973,9 +975,33 @@ async function applySnapshot($: EngineInterface, value: unknown): Promise<boolea
 const isOnScreen = (conv: string) => threadOpen && selected === conv
 
 // conv: the chat it is about, so a muted chat stays quiet.
+function cleanPrivacy(value: unknown): Privacy {
+  const p = (value && typeof value === 'object' ? value : {}) as Partial<Privacy>
+  return {
+    readReceipts: p.readReceipts !== false,
+    typing: p.typing !== false,
+    notifications: p.notifications !== false,
+    sound: p.sound === 'on' || p.sound === 'off' ? p.sound : 'auto',
+  }
+}
+
+const SOUND_GAP_MS = 2000
+let soundAt = 0
+
+// A bell or a banner from the terminal may already make a sound, which the mod cannot hear; 'auto' stays quiet then.
+async function chime($: EngineInterface, sent: boolean) {
+  if (privacy.sound === 'off' || (privacy.sound === 'auto' && sent)) return
+  const now = await $.clock.now()
+  if (now - soundAt < SOUND_GAP_MS) return
+  soundAt = now
+  await $.audio.play({ asset: 'sounds/message.wav' })
+}
+
 function notify($: EngineInterface, title: string, text: string, conv?: string) {
   if (!privacy.notifications || (conv && (muted.includes(conv) || isOnScreen(conv)))) return
-  void $.ui.notify(text.slice(0, 200), { title }).catch(() => {})
+  void $.ui.notify(text.slice(0, 200), { title })
+    .then(r => chime($, r.isSent), () => chime($, false))
+    .catch(() => {})
 }
 
 // Events that belong to no chat; every session shows each one once as a toast.
@@ -1161,11 +1187,7 @@ async function refresh($: EngineInterface, quiet = false) {
   readAt = savedRead && typeof savedRead === 'object' ? (savedRead as Record<string, number>) : {}
   status = (await $.store.get('status')) as Status | undefined
   const savedPrivacy = (await $.store.get('privacy')) as Partial<Privacy> | undefined
-  privacy = {
-    readReceipts: savedPrivacy?.readReceipts !== false,
-    typing: savedPrivacy?.typing !== false,
-    notifications: savedPrivacy?.notifications !== false,
-  }
+  privacy = cleanPrivacy(savedPrivacy)
   muted = asArray<string>(await $.store.get('muted'))
   primary = (await $.store.get('primary')) !== false
   const savedDevices = await $.store.get('devices')
@@ -2121,6 +2143,9 @@ export const register: Register = on => {
           onPress={() => setPrivacy($, { typing: !privacy.typing })} />
         <Button key="toggle-notify" label={t(privacy.notifications ? 'notificationsOn' : 'notificationsOff')} plain dimColor={!privacy.notifications}
           onPress={() => setPrivacy($, { notifications: !privacy.notifications })} />
+        <Button key="toggle-sound" label={t(privacy.sound === 'on' ? 'soundOn' : privacy.sound === 'off' ? 'soundOff' : 'soundAuto')}
+          plain dimColor={privacy.sound === 'off'}
+          onPress={() => setPrivacy($, { sound: privacy.sound === 'auto' ? 'on' : privacy.sound === 'on' ? 'off' : 'auto' })} />
       </Box>
     )
 

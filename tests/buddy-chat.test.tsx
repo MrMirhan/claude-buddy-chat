@@ -5,7 +5,7 @@ import { ml_kem768 } from '../hooks/vendor/mlkem.js'
 
 type KP = { publicKey: Uint8Array; secretKey: Uint8Array }
 type Post = { url: string; body: string }
-type World = { feed: string[]; linkFeed: string[]; statuses: string[]; posts: Post[]; gets: number; opens: string[]; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
+type World = { feed: string[]; linkFeed: string[]; statuses: string[]; sounds: string[]; notifySent: boolean; posts: Post[]; gets: number; opens: string[]; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
 
 const enc = (s: string) => new TextEncoder().encode(s)
 const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
@@ -37,7 +37,7 @@ const sent = (w: World, kp: KP) => to(w, kp).filter(p => !['kem', 'pq', 'receipt
 
 // spawn stands in for curl; without one the stream cannot start and the poller carries the test.
 function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?: (e: { argv: string[] }) => AsyncGenerator<object>): World {
-  const w: World = { feed: [], linkFeed: [], statuses: [], posts: [], gets: 0, opens: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
+  const w: World = { feed: [], linkFeed: [], statuses: [], sounds: [], notifySent: true, posts: [], gets: 0, opens: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
   mock.store(on, store)
   w.clock = mock.clock(on, { now: 1_800_000_000_000 })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -52,7 +52,11 @@ function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?:
     yield* spawn(e)
   } as never)
   on('ui.toast', (_, e) => { w.toasts.push(String((e as { text?: string }).text ?? '')); return { value: undefined } as never })
-  on('ui.notify', (_, e) => { w.notes.push(String((e as { text?: string }).text ?? JSON.stringify(e))); return { value: { isSent: true, channel: 'terminal' } } as never })
+  on('ui.notify', (_, e) => {
+    w.notes.push(String((e as { text?: string }).text ?? JSON.stringify(e)))
+    return { value: w.notifySent ? { isSent: true, channel: 'iterm2' } : { isSent: false, reason: 'no-surface' } } as never
+  })
+  on('audio.play', (_, e) => { w.sounds.push(JSON.stringify(e)); return { value: undefined } as never })
   on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
     const q = (e as unknown as { questions: { question: string }[] }).questions[0]?.question ?? ''
     return { result: { questions: [], answers: { [q]: w.answer.value } } } as never
@@ -1071,5 +1075,33 @@ test('devices: a linked device that unlinks deletes the account and starts over'
   const after = /(?:ID'n|ID): (\S{43})/.exec((await run($, 'buddy-id')).text ?? '')?.[1]
   expect(after).not.toBe(before)
   expect(await list($)).not.toContain('Ahmet')
+  await ui.unmount()
+})
+
+test('sound: auto chimes only when the notification was not shown; on always; off never', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  const me = await start($)
+  const say = async (id: string) => {
+    w.feed.push(envelope(ahmet, me, { t: 'dm', id, name: 'A', text: 'ses ' + id }))
+    await w.clock.advance(8000)
+  }
+  await say('a0a0a0a0a0a0a0a1')
+  expect(w.sounds.length).toBe(0)
+  w.notifySent = false
+  await say('a0a0a0a0a0a0a0a2')
+  expect(w.sounds.length).toBe(1)
+  expect(w.sounds[0]).toContain('sounds/message.wav')
+
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-people' })
+  await ui.press({ key: 'toggle-sound' })
+  w.notifySent = true
+  await say('a0a0a0a0a0a0a0a3')
+  expect(w.sounds.length).toBe(2)
+  await ui.press({ key: 'toggle-sound' })
+  w.notifySent = false
+  await say('a0a0a0a0a0a0a0a4')
+  expect(w.sounds.length).toBe(2)
   await ui.unmount()
 })

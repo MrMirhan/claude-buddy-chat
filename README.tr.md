@@ -19,6 +19,7 @@ buddy-chat bir Claude Code [mod'u](https://code.claude.com/docs/en/plugins/mods/
 - Okundu bilgisi ve yazıyor göstergesi için gizlilik ayarları. Okundu bilgisi kapalıyken ne gönderirsin ne görürsün.
 - Arkadaşlıktan çıkarma (karşı taraf bilgilendirilir) ve engelleme (bilgilendirilmez)
 - Yeni mesaj ve istekler için toast ve işletim sistemi bildirimi. Hepsi için bir aç/kapa ve her sohbet için sessize alma düğmesi var. Ekranda açık olan sohbet bildirim göstermez.
+- Üç ayarlı mesaj sesi: **otomatik** sadece bildirim gösterilmediyse çalar (modların işletim sistemi bildirimi gönderemediği Desktop uygulamasında olduğu gibi), **açık** her zaman, **kapalı** hiçbir zaman. macOS'ta çalar.
 - Claude Desktop, VS Code eklentisi ve terminalde panel
 - İngilizce ve Türkçe. Varsayılan dil İngilizce.
 
