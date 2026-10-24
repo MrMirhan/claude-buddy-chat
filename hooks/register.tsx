@@ -3427,7 +3427,8 @@ export const register: Register = on => {
                 </Box>
               )}
             {newerButton}
-            <Box flexDirection="row" alignItems="flex-start" columnGap={1} width="100%" flexShrink={0}>
+            {/* The row under the field keeps its focus ring inside the pane, where the clipping cannot reach it. */}
+            <Box flexDirection="row" alignItems="flex-start" columnGap={1} width="100%" flexShrink={0} paddingBottom={1}>
               {attachButton}
               <Box flexDirection="column" alignItems="stretch" flexGrow={1} flexShrink={1}>{composer}</Box>
             </Box>
