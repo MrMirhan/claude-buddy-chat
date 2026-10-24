@@ -14,6 +14,7 @@ buddy-chat is a Claude Code [mod](https://code.claude.com/docs/en/plugins/mods/o
 - Edit and delete your own messages for everyone, and copy any message
 - Message states: sending ◷, sent ✓, delivered ✓✓ and read (blue ✓✓)
 - A typing indicator in direct chats
+- Pictures, videos, audio and other files up to 3 MB, sealed on the relay and saved under `~/Downloads/buddy-chat/`; audio plays in the pane
 - Recovery words (12, or 24 for accounts made before 0.17) that bring your account back after a wipe, and an optional encrypted backup to a folder on your computer
 - One account on several computers: link a device, and messages and settings sync between your devices
 - Messages that are not confirmed go out again for up to 7 days, so a friend who is away for more than 12 hours still gets them
@@ -169,6 +170,7 @@ The words do not hold contacts or messages. For those, select **Choose a backup 
 - ntfy.sh gives each IP address 60 requests, then adds one request every 5 seconds. If buddy-chat gets HTTP 429, it waits one minute.
 - ntfy.sh keeps messages for 12 hours. buddy-chat sends unconfirmed messages again for up to 7 days, but only to friends on 0.10 or later. A message to an older version that opens no session in 12 hours is lost.
 - One message holds about 2,500 characters.
+- A file holds 3 MB at most, because a mod reads at most 4 MiB from a file. ntfy.sh keeps a file for 3 hours: a friend who opens no session in that time does not get it. Saving a file needs the system's `base64` tool (macOS, Linux) or PowerShell (Windows).
 - Claude Code's plugin store keeps the newest 300 messages. Older ones move to files under `~/.claude/buddy-chat/history/` in batches and come back when you scroll past the top of a chat. These files are not encrypted; the backup holds sealed copies of them. A linked device gets only the messages in the store.
 - Each group message, edit and delete uses one request for each member.
 - Receipts and typing signals also use requests. buddy-chat sends one receipt for each batch of messages and one typing signal every 5 seconds at most. Groups have no typing indicator.

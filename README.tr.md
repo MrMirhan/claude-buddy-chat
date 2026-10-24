@@ -14,6 +14,7 @@ buddy-chat bir Claude Code [mod'u](https://code.claude.com/docs/en/plugins/mods/
 - Kendi mesajını herkesten düzenleme ve silme; her mesajı kopyalama
 - Mesaj durumları: gönderiliyor ◷, gönderildi ✓, iletildi ✓✓, okundu (mavi ✓✓)
 - Birebir sohbetlerde "yazıyor…" göstergesi
+- 3 MB'a kadar resim, video, ses ve diğer dosyalar; relay'de şifreli durur ve `~/Downloads/buddy-chat/` altına kaydedilir; ses panelde çalınır
 - Format sonrası hesabını geri getiren kurtarma kelimeleri (12; 0.17'den önce oluşan hesaplarda 24) ve isteğe bağlı, bilgisayarındaki bir klasöre şifreli yedek
 - Birden çok bilgisayarda tek hesap: cihaz bağla, mesajlar ve ayarlar cihazların arasında eşitlensin
 - Onaylanmayan mesajlar 7 güne kadar yeniden gönderilir; 12 saatten uzun ortada olmayan arkadaşa da ulaşır
@@ -172,6 +173,8 @@ Kelimeler kişileri ve mesajları içermez. Onlar için aynı karttaki **Yedek k
 - Her grup mesajı, düzenleme ve silme üye başına bir istek harcar.
 - Okundu bilgileri ve yazıyor sinyali de istek harcar. buddy-chat her mesaj grubu için tek bir bilgi, en fazla 5 saniyede bir yazıyor sinyali gönderir. Gruplarda yazıyor göstergesi yok.
 - İletildi bilgisi, alıcıda Claude Code açıkken gider.
+- Bir mesaj yaklaşık 2.500 karakter alır.
+- Bir dosya en fazla 3 MB olabilir, çünkü mod bir dosyadan en fazla 4 MiB okuyabiliyor. ntfy.sh bir dosyayı 3 saat tutar; o sürede hiç oturum açmayan arkadaş dosyayı alamaz. Dosyayı kaydetmek için sistemin `base64` aracı (macOS, Linux) ya da PowerShell (Windows) gerekir.
 
 ## Güncelleme notları
 

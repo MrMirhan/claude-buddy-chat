@@ -40,6 +40,9 @@ const LINK_TTL_MS = 10 * 60_000
 const LINK_RE = /buddylink-([A-Za-z0-9_-]{43})/
 // A payload longer than this goes out in parts; each sealed part stays under ntfy's 4096-byte limit.
 const PART_CHARS = 2000
+// The mod reads at most 4 MiB from a file; 3 MB leaves room for the sealing and the base64 around it.
+const MAX_FILE_BYTES = 3 * 1024 * 1024
+const FILE_URL_RE = /^https:\/\/ntfy\.sh\/file\/[A-Za-z0-9]+(\.[a-z0-9]+)?$/
 const SNAPSHOT_MAX_CHARS = 60_000
 const BACKOFF_MS = 60_000
 // ntfy turns a body over 4096 bytes into an attachment, which the poller cannot read.
@@ -96,7 +99,12 @@ type Msg = {
   // Mine: the device that sent it, and when it last went out again.
   dev?: string
   tried?: number
+  // An attached file, sealed on the relay, and where this computer saved it.
+  file?: FileRef
+  saved?: string
 }
+// The relay holds the file sealed with `key`, a key of its own that only the sealed message carries.
+type FileRef = { url: string; key: string; nonce: string; name: string; mime: string; size: number }
 type Notice = { key: string; sys: Sys }
 type Envelope = { v: number; from: string; nonce: string; box: string; h?: number }
 type Payload =
@@ -104,10 +112,10 @@ type Payload =
   | { t: 'kem'; id: string; kem: string }
   | { t: 'pq'; id: string; ct: string }
   | { t: 'unfriend'; id: string }
-  | { t: 'dm'; id: string; name: string; text: string }
+  | { t: 'dm'; id: string; name: string; text: string; file?: FileRef }
   | { t: 'edit'; id: string; ref: string; text: string }
   | { t: 'delete'; id: string; ref: string }
-  | { t: 'group'; id: string; g: string; name: string; text: string }
+  | { t: 'group'; id: string; g: string; name: string; text: string; file?: FileRef }
   | { t: 'invite'; id: string; g: string; title: string; name: string; members: Member[] }
   | { t: 'leave'; id: string; g: string; name: string }
   | { t: 'receipt'; id: string; kind: ReceiptKind; refs: string[] }
@@ -225,6 +233,8 @@ let restedFor = ''
 let wheelRows = 0
 let avgRows = 3
 const WHEEL_ROWS = 3
+const WHEEL_SETTLE_MS = 80
+let wheelTimer: { cancel: () => void } | undefined
 let newestOpen = ''
 const STORE_MESSAGES = 300
 const ARCHIVE_TO = 250
@@ -615,6 +625,7 @@ function cleanMsg(value: unknown): Msg | undefined {
     ...(m.deliveredTo ? { deliveredTo: idList(m.deliveredTo) } : {}),
     ...(m.readBy ? { readBy: idList(m.readBy) } : {}),
     ...(typeof m.dev === 'string' ? { dev: m.dev.slice(0, 32) } : {}),
+    ...(cleanFile(m.file) ? { file: cleanFile(m.file)! } : {}),
   }
 }
 
@@ -820,7 +831,8 @@ async function retryUnconfirmed($: EngineInterface) {
     budget--
     const group = groups.find(g => groupConv(g.id) === m.conv)
     for (const r of targets) {
-      await post($, r.id, group ? { t: 'group', id: m.key, g: group.id, name: myPublicName(), text: m.text } : { t: 'dm', id: m.key, name: myPublicName(), text: m.text })
+      const file = m.file ? { file: m.file } : {}
+      await post($, r.id, group ? { t: 'group', id: m.key, g: group.id, name: myPublicName(), text: m.text, ...file } : { t: 'dm', id: m.key, name: myPublicName(), text: m.text, ...file })
     }
     await patchMessage($, m.key, me, { tried: now })
   }
@@ -1107,13 +1119,22 @@ async function restoreFromWords($: EngineInterface, text: string): Promise<strin
 
 // Opens the system's folder dialog: AppleScript on macOS, zenity on Linux, PowerShell on Windows.
 // Resolves to the folder, or undefined when cancelled; with no dialog at all it turns on the typed-path field.
-async function chooseFolder($: EngineInterface, prompt: string): Promise<string | undefined> {
-  const tries: string[][] = [
-    ['osascript', '-e', 'POSIX path of (choose folder with prompt ' + JSON.stringify(prompt) + ')'],
-    ['zenity', '--file-selection', '--directory', '--title=' + prompt],
-    ['powershell', '-NoProfile', '-Command',
-      'Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; if ($d.ShowDialog() -eq "OK") { $d.SelectedPath }'],
-  ]
+const chooseFolder = ($: EngineInterface, prompt: string) => choosePath($, prompt, 'folder')
+
+async function choosePath($: EngineInterface, prompt: string, kind: 'folder' | 'file'): Promise<string | undefined> {
+  const tries: string[][] = kind === 'folder'
+    ? [
+      ['osascript', '-e', 'POSIX path of (choose folder with prompt ' + JSON.stringify(prompt) + ')'],
+      ['zenity', '--file-selection', '--directory', '--title=' + prompt],
+      ['powershell', '-NoProfile', '-Command',
+        'Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; if ($d.ShowDialog() -eq "OK") { $d.SelectedPath }'],
+    ]
+    : [
+      ['osascript', '-e', 'POSIX path of (choose file with prompt ' + JSON.stringify(prompt) + ')'],
+      ['zenity', '--file-selection', '--title=' + prompt],
+      ['powershell', '-NoProfile', '-Command',
+        'Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; if ($d.ShowDialog() -eq "OK") { $d.FileName }'],
+    ]
   for (const argv of tries) {
     let result
     try {
@@ -1128,6 +1149,112 @@ async function chooseFolder($: EngineInterface, prompt: string): Promise<string 
   $.ui.invalidate('ui.render')
   $.ui.toast(t('backupNoPicker'))
   return undefined
+}
+
+// ---- Files ----
+
+const MIME: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', heic: 'image/heic',
+  mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', aac: 'audio/aac',
+  pdf: 'application/pdf', txt: 'text/plain', zip: 'application/zip',
+}
+const mimeOf = (name: string) => MIME[name.split('.').pop()?.toLowerCase() ?? ''] ?? 'application/octet-stream'
+const std64 = (bytes: Uint8Array) => b64(bytes).replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (b64(bytes).length % 4)) % 4)
+// A name safe to save under: no folders, no leading dot, no characters a file system refuses.
+const safeName = (name: string) => cleanText(name, 120).replace(/[\/\\:*?"<>|]/g, '_').replace(/^\.+/, '') || 'file'
+const sizeText = (n: number) => (n < 1024 * 1024 ? Math.max(1, Math.round(n / 1024)) + ' KB' : (n / 1024 / 1024).toFixed(1) + ' MB')
+const fileIcon = (mime: string) => (mime.startsWith('image/') ? '🖼' : mime.startsWith('video/') ? '🎬' : mime.startsWith('audio/') ? '🎵' : '📎')
+
+function cleanFile(value: unknown): FileRef | undefined {
+  const f = value as Partial<FileRef> | null
+  if (!f || typeof f.url !== 'string' || !FILE_URL_RE.test(f.url) || typeof f.key !== 'string' || typeof f.nonce !== 'string') return undefined
+  const name = safeName(String(f.name ?? ''))
+  return { url: f.url, key: f.key, nonce: f.nonce, name, mime: mimeOf(name), size: typeof f.size === 'number' ? f.size : 0 }
+}
+
+// $.fs.write takes text, so the bytes go through the system's base64 tool: macOS, then Linux, then Windows.
+async function writeBytes($: EngineInterface, path: string, base64: string): Promise<boolean> {
+  await $.fs.write(path, '')
+  const tries: string[][] = [
+    ['base64', '-D', '-o', path],
+    ['sh', '-c', 'base64 -d > "$1"', 'sh', path],
+    ['powershell', '-NoProfile', '-Command', '[IO.File]::WriteAllBytes($args[0], [Convert]::FromBase64String([Console]::In.ReadToEnd()))', path],
+  ]
+  for (const argv of tries) {
+    try {
+      if ((await $.process.run(argv, { stdin: base64, timeoutMs: 60_000 })).exitCode === 0) return true
+    } catch {
+      // not on this system
+    }
+  }
+  return false
+}
+
+async function openPath($: EngineInterface, path: string) {
+  for (const argv of [['open', path], ['xdg-open', path], ['cmd', '/c', 'start', '', path]]) {
+    try {
+      if ((await $.process.run(argv, { timeoutMs: 10_000 })).exitCode === 0) return
+    } catch {
+      // not on this system
+    }
+  }
+  $.ui.toast(t('fileOpenFailed'))
+}
+
+// Seals the file with a key of its own and leaves it on the relay; the message carries that key, sealed per person.
+async function attachFile($: EngineInterface, conv: string): Promise<Outcome> {
+  const path = await choosePath($, t('attachPrompt'), 'file')
+  if (!path) return { ok: false, text: '' }
+  let size = 0
+  try { size = (await $.fs.stat(path)).size } catch { return { ok: false, text: t('fileReadFailed') } }
+  if (size > MAX_FILE_BYTES) return { ok: false, text: t('fileTooBig', { max: '3 MB' }) }
+  let bytes: Uint8Array
+  try { bytes = unb64((await $.fs.read(path, { as: 'bytes' })).base64) } catch { return { ok: false, text: t('fileReadFailed') } }
+  const key = nacl.randomBytes(32)
+  const nonce = nacl.randomBytes(24)
+  const box = nacl.secretbox(bytes, nonce, key)
+  let url = ''
+  try {
+    const res = await $.http.fetch(RELAY + '/buddy-chat-f-' + hex(nacl.randomBytes(16)), { method: 'PUT', headers: { Filename: 'file.bin' }, body: b64(box) })
+    url = String((JSON.parse(res.text) as { attachment?: { url?: unknown } }).attachment?.url ?? '')
+  } catch {
+    url = ''
+  }
+  if (!FILE_URL_RE.test(url)) return { ok: false, text: t('fileUploadFailed') }
+  const name = safeName(path.split(/[\/\\]/).pop() ?? 'file')
+  const file: FileRef = { url, key: b64(key), nonce: b64(nonce), name, mime: mimeOf(name), size }
+  return sendText($, conv, '📎 ' + name, file, path)
+}
+
+// Fetches a received file while the relay still has it (3 hours) and saves it under ~/Downloads/buddy-chat.
+async function downloadFile($: EngineInterface, msg: Msg): Promise<boolean> {
+  if (!msg.file) return false
+  let plain: Uint8Array | null = null
+  try {
+    const res = await $.http.fetch(msg.file.url)
+    if (res.ok) plain = nacl.secretbox.open(unb64(res.text.trim()), unb64(msg.file.nonce), unb64(msg.file.key))
+  } catch {
+    plain = null
+  }
+  if (!plain) return false
+  const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''
+  if (!home) return false
+  const path = home + '/Downloads/buddy-chat/' + msg.key.slice(0, 6) + '-' + msg.file.name
+  if (!(await writeBytes($, path, std64(plain)))) return false
+  await patchMessage($, msg.key, msg.from, { saved: path })
+  $.ui.invalidate('ui.render')
+  return true
+}
+
+async function playFile($: EngineInterface, msg: Msg) {
+  if (!msg.saved || !msg.file) return
+  try {
+    const { base64 } = await $.fs.read(msg.saved, { as: 'bytes' })
+    await $.audio.play({ base64, mime: msg.file.mime })
+  } catch {
+    $.ui.toast(t('filePlayFailed'))
+  }
 }
 
 async function expandPath($: EngineInterface, path: string): Promise<string> {
@@ -1389,7 +1516,10 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
     case 'dm': {
       if (c?.state !== 'friend') return
       const text = String(p.text ?? '')
-      await addMessages($, [{ key: p.id, conv: convOf(env.from), from: env.from, name: ownName(c.profile), text, at, mine: false }])
+      const file = cleanFile(p.file)
+      const msg: Msg = { key: p.id, conv: convOf(env.from), from: env.from, name: ownName(c.profile), text, at, mine: false, ...(file ? { file } : {}) }
+      await addMessages($, [msg])
+      if (file) void downloadFile($, msg).catch(() => {})
       queueReceipt(env.from, 'delivered', p.id)
       await setTyping($, convOf(env.from), env.from, 0)
       notify($, nameOf(env.from), text, convOf(env.from))
@@ -1444,7 +1574,10 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
   if (!member) return
   if (p.t === 'group') {
     const text = String(p.text ?? '')
-    await addMessages($, [{ key: p.id, conv: groupConv(group.id), from: env.from, name: member.name, text, at, mine: false }])
+    const file = cleanFile(p.file)
+    const msg: Msg = { key: p.id, conv: groupConv(group.id), from: env.from, name: member.name, text, at, mine: false, ...(file ? { file } : {}) }
+    await addMessages($, [msg])
+    if (file) void downloadFile($, msg).catch(() => {})
     queueReceipt(env.from, 'delivered', p.id)
     notify($, '# ' + group.title, nameOf(env.from, member.name) + ': ' + text, groupConv(group.id))
   } else if (p.t === 'leave') {
@@ -1753,20 +1886,20 @@ function matchConv(text: string): { conv: Conv; rest: string } | undefined {
   return best && { conv: best.conv, rest: best.rest }
 }
 
-async function sendText($: EngineInterface, conv: string, text: string): Promise<Outcome> {
+async function sendText($: EngineInterface, conv: string, text: string, file?: FileRef, savedPath?: string): Promise<Outcome> {
   if (!text.trim()) return { ok: false, text: t('emptyMessage') }
   if (!recipients(conv).length) return { ok: false, text: t('errNoRecipients') }
   const id = newId()
   const group = groups.find(g => groupConv(g.id) === conv)
   shown.add(id)
   typingSentAt.delete(conv)
-  const msg: Msg = { key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true, dev: deviceId }
-  await addMessages($, [{ ...msg, state: 'sending' }])
+  const msg: Msg = { key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true, dev: deviceId, ...(file ? { file } : {}) }
+  await addMessages($, [{ ...msg, state: 'sending', ...(savedPath ? { saved: savedPath } : {}) }])
   newerSkip = 0
   $.ui.invalidate('ui.render')
   scrollToRest($)
   const result = await fanOut($, conv, () =>
-    group ? { t: 'group', id, g: group.id, name: myPublicName(), text } : { t: 'dm', id, name: myPublicName(), text })
+    group ? { t: 'group', id, g: group.id, name: myPublicName(), text, ...(file ? { file } : {}) } : { t: 'dm', id, name: myPublicName(), text, ...(file ? { file } : {}) })
   if (result.error) {
     inbox = await mutate<Msg>($, 'inbox', current => current.filter(m => m.key !== id))
     $.ui.invalidate('ui.render')
@@ -2299,10 +2432,15 @@ export const register: Register = on => {
       const rows = Math.sign(e.by) * Math.max(WHEEL_ROWS, Math.abs(e.by))
       if (Math.sign(wheelRows) === Math.sign(rows)) wheelRows += rows
       else wheelRows = rows
-      const steps = Math.trunc(wheelRows / avgRows)
-      if (steps) {
-        wheelRows -= steps * avgRows
-        pageBy($, -Math.max(-PAGE_STEP, Math.min(PAGE_STEP, steps)))
+      // Ticks that come close together move the messages once, so a fast scroll redraws less often.
+      if (!wheelTimer) {
+        wheelTimer = $.clock.after(WHEEL_SETTLE_MS, () => {
+          wheelTimer = undefined
+          const steps = Math.trunc(wheelRows / avgRows)
+          if (!steps) return
+          wheelRows -= steps * avgRows
+          pageBy($, -Math.max(-PAGE_STEP, Math.min(PAGE_STEP, steps)))
+        })
       }
     }
     return next({ ...e, offset: restOffset })
@@ -3032,7 +3170,8 @@ export const register: Register = on => {
             redraw()
             const name = nameOf(m.from, m.name)
             void $.prompt.submit({
-              text: group ? t('forwardGroup', { group: group.title, name, text: m.text }) : t('forwardDm', { name, text: m.text }),
+              text: (group ? t('forwardGroup', { group: group.title, name, text: m.text }) : t('forwardDm', { name, text: m.text }))
+                + (m.saved ? '\n\n' + t('forwardFile', { path: m.saved }) : ''),
             })
           }} />
         </Box>
@@ -3050,9 +3189,40 @@ export const register: Register = on => {
       return <Text size="caption" color={graphic ? MINE_SOFT : undefined} dimColor={!graphic}>{mark}</Text>
     }
 
+    // An attached file: its name and size, and what can be done with it here.
+    const fileView = (m: Msg) => {
+      if (!m.file || m.deleted) return null
+      const f = m.file
+      const fresh = now - m.at < 3 * 3_600_000
+      return (
+        <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
+          <Text weight="semibold" color={graphic && m.mine ? '#ffffff' : undefined} wrap="truncate-middle">{fileIcon(f.mime) + ' ' + f.name}</Text>
+          <Text size="caption" color={graphic && m.mine ? MINE_SOFT : undefined} dimColor={!graphic || !m.mine}>{sizeText(f.size)}</Text>
+          {m.saved
+            ? (
+              <Box flexDirection="row" columnGap={1}>
+                <Button key={'file-open-' + m.key} label={t('fileOpen')} plain onPress={() => openPath($, m.saved!)} />
+                {f.mime.startsWith('audio/') && <Button key={'file-play-' + m.key} label="▶" plain onPress={() => playFile($, m)} />}
+              </Box>
+            )
+            : fresh
+              ? <Button key={'file-get-' + m.key} label={t('fileDownload')} plain
+                  onPress={async () => { if (!(await downloadFile($, m))) toast(t('fileDownloadFailed')) }} />
+              : <Text size="caption" dimColor>{t('fileExpired')}</Text>}
+        </Box>
+      )
+    }
+    // The text is the file's name when nothing was written with it; then the card says it all.
+    const captionOf = (m: Msg) => (m.file && m.text === '📎 ' + m.file.name ? '' : m.text)
+
     const body = (m: Msg) => m.deleted
       ? <Text dimColor italic>{t('deletedMsg')}</Text>
-      : <Text wrap="wrap" color={m.key === editing ? 'warning' : undefined}>{m.text}{m.edited ? <Text dimColor>{t('edited')}</Text> : ''}</Text>
+      : (
+        <Box flexDirection="column">
+          {fileView(m)}
+          {captionOf(m) && <Text wrap="wrap" color={m.key === editing ? 'warning' : undefined}>{captionOf(m)}{m.edited ? <Text dimColor>{t('edited')}</Text> : ''}</Text>}
+        </Box>
+      )
 
     const rowsView = visible.map((m, i) => {
       const prev = visible[i - 1]
@@ -3090,7 +3260,12 @@ export const register: Register = on => {
                 borderStyle="round" borderColor={m.mine ? ACCENT : BUBBLE_BG} paddingX={1}>
                 {m.deleted
                   ? <Text italic color={m.mine ? MINE_SOFT : undefined} dimColor={!m.mine}>{t('deletedMsg')}</Text>
-                  : <Text wrap="wrap" color={m.mine ? '#ffffff' : undefined}>{m.text}</Text>}
+                  : (
+                    <Box flexDirection="column">
+                      {fileView(m)}
+                      {captionOf(m) && <Text wrap="wrap" color={m.mine ? '#ffffff' : undefined}>{captionOf(m)}</Text>}
+                    </Box>
+                  )}
                 <Box flexDirection="row" justifyContent="flex-end" alignItems="center" columnGap={1}>
                   <Text size="caption" color={m.mine ? MINE_SOFT : undefined} dimColor={!m.mine}>
                     {(m.edited ? t('editedShort') + ' · ' : '') + clock(m.at)}
@@ -3129,6 +3304,14 @@ export const register: Register = on => {
       )
     })
 
+    const attachButton = Input && !editTarget && (
+      <Button key="attach" label="📎" plain hotkey={graphic ? undefined : 'a'}
+        onPress={async () => {
+          const r = await attachFile($, current.id)
+          if (r.text && !r.ok) toast(r.text)
+        }} />
+    )
+
     const composer = !Input
       ? <Text dimColor>{t('noInputHint')}</Text>
       : editTarget
@@ -3146,7 +3329,7 @@ export const register: Register = on => {
         )
         : <Input key={composeKey(current.id)}
             label={graphic ? undefined : '→ ' + (current.isGroup ? '# ' : '') + current.title}
-            placeholder={t('composePlaceholder', { title: (current.isGroup ? '# ' : '') + current.title })} value="" submitLabel={t('send')}
+            placeholder={t('composePlaceholder', { title: (current.isGroup ? '# ' : '') + current.title })} value="" submitLabel={graphic ? '➤' : t('send')}
             autoFocus={graphic ? true : undefined} rows={graphic ? 2 : undefined}
             onInput={(value: string) => { void sendTyping($, current.id, value).catch(() => {}) }}
             onSubmit={async (value: string) => {
@@ -3232,7 +3415,10 @@ export const register: Register = on => {
               )}
             {newerButton}
             {actionBar}
-            <Box flexDirection="column" alignItems="stretch" width="100%" flexShrink={0}>{composer}</Box>
+            <Box flexDirection="row" alignItems="center" columnGap={1} width="100%" flexShrink={0}>
+              {attachButton}
+              <Box flexDirection="column" alignItems="stretch" flexGrow={1} flexShrink={1}>{composer}</Box>
+            </Box>
           </Box>
           {scrollRow}
         </Box>
@@ -3265,6 +3451,7 @@ export const register: Register = on => {
         {rule}
         <Box flexDirection="row" columnGap={1}>
           <Box flexGrow={1} flexShrink={1}>{composer}</Box>
+          {attachButton}
           {Input && !editTarget && (
             <Button key="write" label={t('writeButton')} plain hotkey="i"
               onPress={() => { void $.ui.focus({ requestId: PANE, key: composeKey(current.id) }).catch(() => {}) }} />

@@ -6,7 +6,7 @@ import { backupKey, fromWords, keysFromEntropy, toWords } from '../hooks/recover
 
 type KP = { publicKey: Uint8Array; secretKey: Uint8Array }
 type Post = { url: string; body: string }
-type World = { feed: string[]; linkFeed: string[]; statuses: string[]; sounds: string[]; notifySent: boolean; posts: Post[]; gets: number; opens: string[]; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
+type World = { feed: string[]; linkFeed: string[]; uploads: Map<string, string>; statuses: string[]; sounds: string[]; notifySent: boolean; posts: Post[]; gets: number; opens: string[]; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
 
 const enc = (s: string) => new TextEncoder().encode(s)
 const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
@@ -38,7 +38,7 @@ const sent = (w: World, kp: KP) => to(w, kp).filter(p => !['kem', 'pq', 'receipt
 
 // spawn stands in for curl; without one the stream cannot start and the poller carries the test.
 function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?: (e: { argv: string[] }) => AsyncGenerator<object>): World {
-  const w: World = { feed: [], linkFeed: [], statuses: [], sounds: [], notifySent: true, posts: [], gets: 0, opens: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
+  const w: World = { feed: [], linkFeed: [], uploads: new Map(), statuses: [], sounds: [], notifySent: true, posts: [], gets: 0, opens: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
   mock.store(on, store)
   w.clock = mock.clock(on, { now: 1_800_000_000_000 })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -68,6 +68,12 @@ function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?:
       w.posts.push({ url: e.url, body: String(e.init.body) })
       return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
     }
+    if (e.init?.method === 'PUT') {
+      const url = 'https://ntfy.sh/file/f' + w.uploads.size + '.txt'
+      w.uploads.set(url, String(e.init.body))
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ attachment: { url } }) } }
+    }
+    if (e.url.startsWith('https://ntfy.sh/file/')) return { value: { status: 200, ok: true, headers: {}, text: w.uploads.get(e.url) ?? '' } }
     w.gets++
     const source = e.url.includes('buddy-chat-link-') ? w.linkFeed : w.feed
     const lines = source.splice(0).map(m => JSON.stringify({ id: 'ev' + n++, event: 'message', time: 1_800_000_000, message: m }))
@@ -682,7 +688,7 @@ test('desktop: the chat shows what fits the pane, pages older messages and holds
     ({ key: 'p' + i, conv, from: idOf(ahmet), name: 'A', text: 'satır ' + i, at: (i + 1) * 1000, mine: false }))
   const offsets: number[] = []
   on('ui.scroll', (_, e) => { offsets.push((e as { offset: number }).offset); return {} as never })
-  setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
   await start($)
   const wide = { ...pane('desktop'), props: { ...pane('desktop').props, bodyColumns: 140 } }
   const ui = await $.ui.mount(wide)
@@ -697,10 +703,15 @@ test('desktop: the chat shows what fits the pane, pages older messages and holds
   // A tick is three rows; a short message here takes a bit more, so the second tick moves the window by one.
   const tick = () => $.ui.scroll({ component: 'Pane', requestId: 'buddy-chat', offset: 0, by: -1, bodyRows: 40, contentRows: 42, origin: { kind: 'person' } } as never)
   await tick()
+  await w.clock.advance(100)
   await ui.redraw()
   expect(offsets.at(-1)).toBe(1)
   expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).toBeDefined()
+  // Ticks close together are summed and move the messages once, after a short pause.
   await tick()
+  await ui.redraw()
+  expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).toBeDefined()
+  await w.clock.advance(100)
   await ui.redraw()
   expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).toBeUndefined()
   expect((await ui.find({ key: 'newer' }))?.text).toContain('1')
@@ -1327,5 +1338,55 @@ test('settings show the plugin version from plugin.json', async ($, on) => {
   const ui = await $.ui.mount(pane('desktop'))
   await ui.press({ key: 'tab-settings' })
   expect(await shows(ui, { type: 'Text', text: /^buddy-chat 9\.8\.7$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('files: picked, size-checked, sealed on the relay, received, saved and opened', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const disk = new Map<string, string>()
+  const photo = nacl.randomBytes(1234)
+  let picked = '/Users/test/foto.jpg'
+  const opens: string[] = []
+  on('env.get', (_, e) => ({ value: (e as { name: string }).name === 'HOME' ? '/home/test' : undefined }) as never)
+  on('fs.write', (_, e) => { const { path, text } = e as { path: string; text: string }; disk.set(path, text); return { value: undefined } as never })
+  on('fs.stat', (_, e) => ({ value: { kind: 'file', size: (e as { path: string }).path.includes('big') ? 4_000_000 : photo.length, mtimeMs: 0, isLink: false } }) as never)
+  on('fs.read', (_, e) => {
+    if ((e as { path: string }).path === '/Users/test/foto.jpg') return { value: { base64: btoa(String.fromCharCode(...photo)) } } as never
+    throw new Error('missing')
+  })
+  on('process.run', (_, e) => {
+    const { argv, stdin } = e as { argv: string[]; stdin?: string }
+    if (argv[0] === 'osascript') return { value: { exitCode: 0, stdout: picked + '\n', stderr: '' } } as never
+    if (argv[0] === 'base64') { disk.set(argv[3]!, 'BYTES:' + stdin); return { value: { exitCode: 0, stdout: '', stderr: '' } } as never }
+    if (argv[0] === 'open') { opens.push(argv[1]!); return { value: { exitCode: 0, stdout: '', stderr: '' } } as never }
+    throw new Error('not found')
+  })
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  const me = await start($)
+  const ui = await $.ui.mount(pane('desktop'))
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
+
+  picked = '/Users/test/big.mov'
+  await ui.press({ key: 'attach' })
+  expect(w.toasts.at(-1)).toContain('3 MB')
+
+  picked = '/Users/test/foto.jpg'
+  await ui.press({ key: 'attach' })
+  const msg = sent(w, ahmet).map(p => opened(p, ahmet)).find(p => p?.file)
+  expect(msg.file).toMatchObject({ name: 'foto.jpg', mime: 'image/jpeg', size: photo.length })
+  const stored = w.uploads.get(msg.file.url)!
+  expect(stored.includes(btoa(String.fromCharCode(...photo.slice(0, 30))))).toBe(false)
+  const back = nacl.secretbox.open(unb64(stored), unb64(msg.file.nonce), unb64(msg.file.key))!
+  expect(b64(back)).toBe(b64(photo))
+
+  // The other way: a friend's file arrives, is saved under Downloads and opens.
+  w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'e5e5e5e5e5e5e5e5', name: 'A', text: '📎 tatil.png', file: msg.file && { ...msg.file, name: 'tatil.png' } }))
+  await w.clock.advance(8000)
+  await w.clock.settle()
+  const savedPath = [...disk.keys()].find(p => p.startsWith('/home/test/Downloads/buddy-chat/') && p.endsWith('tatil.png') && disk.get(p)!.startsWith('BYTES:'))
+  expect(savedPath).toBeDefined()
+  await ui.redraw()
+  await ui.press({ key: 'file-open-e5e5e5e5e5e5e5e5' })
+  expect(opens).toEqual([savedPath])
   await ui.unmount()
 })
