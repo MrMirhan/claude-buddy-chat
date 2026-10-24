@@ -103,6 +103,8 @@ const THREAD_WINDOW = 30
 const OLDER_PAGE = 20
 // Read by the ui.scroll hook: whether the window sits at the newest message, and what the open chat hides above.
 let atBottom = true
+// Terminal: the message j/k marked; its actions take one key (e, x, f). Empty: no mark.
+let cursor = ''
 let hiddenAbove = 0
 let firstShownKey = ''
 
@@ -810,6 +812,7 @@ async function select($: EngineInterface, conv: string) {
   selected = conv
   editing = ''
   olderExtra = 0
+  cursor = ''
   view = 'chats'
   threadOpen = true
   atBottom = true
@@ -837,6 +840,7 @@ async function closeThread($: EngineInterface) {
   threadOpen = false
   editing = ''
   olderExtra = 0
+  cursor = ''
   $.ui.invalidate('ui.render')
 }
 
@@ -965,7 +969,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     session = await $.session.id()
     view = 'chats'
-    selected = editing = renaming = ''
+    selected = editing = renaming = cursor = ''
     threadOpen = false
     editingProfile = false
     filter = ''
@@ -1149,7 +1153,7 @@ export const register: Register = on => {
       <Box flexDirection="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" rowGap={graphic ? 1 : 0}>
         <Box flexDirection="row" columnGap={graphic ? 1 : 2} alignItems="center">
           {tab('tab-chats', t('tabChats'), 's', view === 'chats', () => { view = 'chats'; redraw() })}
-          {tab('tab-people', t('tabPeople'), 'k', view === 'people', () => { view = 'people'; redraw() }, incoming.length)}
+          {tab('tab-people', t('tabPeople'), 'p', view === 'people', () => { view = 'people'; redraw() }, incoming.length)}
         </Box>
         {statusView}
       </Box>
@@ -1518,7 +1522,7 @@ export const register: Register = on => {
           <Box flexGrow={1} flexShrink={1}>
             <Text weight="semibold" wrap="truncate-end">{myPublicName()}</Text>
           </Box>
-          {tab('tab-people', t('tabPeople'), 'k', false, () => { view = 'people'; redraw() }, incoming.length)}
+          {tab('tab-people', t('tabPeople'), 'p', false, () => { view = 'people'; redraw() }, incoming.length)}
         </Box>
       </Box>
     )
@@ -1573,11 +1577,13 @@ export const register: Register = on => {
 
     const msgActions = (m: Msg) => {
       if (m.deleted) return null
+      const marked = !graphic && m.key === cursor
       if (m.mine) {
         return (
           <Box flexDirection="row" columnGap={1}>
-            <Button key={'edit-' + m.key} label="✎" plain dimColor onPress={() => { editing = m.key; redraw() }} />
-            <Button key={'del-' + m.key} label="✕" plain dimColor
+            <Button key={'edit-' + m.key} label="✎" plain dimColor={!marked} hotkey={marked ? 'e' : undefined}
+              onPress={() => { editing = m.key; redraw() }} />
+            <Button key={'del-' + m.key} label="✕" plain dimColor={!marked} hotkey={marked ? 'x' : undefined}
               onPress={async () => {
                 if (await confirm($, t('confirmDelete'), t('answerDelete'))) toast((await deleteMessage($, m)).text)
               }} />
@@ -1586,7 +1592,7 @@ export const register: Register = on => {
       }
       if (m.forwarded) return <Text dimColor size="caption">{t('forwarded')}</Text>
       return (
-        <Button key={'fwd-' + m.key} label={graphic ? t('forwardButton') : '↗'} plain dimColor
+        <Button key={'fwd-' + m.key} label={graphic ? t('forwardButton') : '↗'} plain dimColor={!marked} hotkey={marked ? 'f' : undefined}
           onPress={async () => {
             inbox = await mutate<Msg>($, 'inbox', cur => cur.map(x => (x.key === m.key ? { ...x, forwarded: true } : x)))
             redraw()
@@ -1664,6 +1670,7 @@ export const register: Register = on => {
           )}
           <Box flexDirection={m.mine ? 'row-reverse' : 'row'} columnGap={1}
             borderStyle={m.mine ? undefined : 'quote'} borderColor={m.mine ? undefined : color}>
+            {m.key === cursor && <Text color="claude" weight="bold">{m.mine ? '‹' : '›'}</Text>}
             {body(m)}
             {msgActions(m)}
           </Box>
@@ -1735,6 +1742,22 @@ export const register: Register = on => {
       )
     }
 
+    // k walks up from the newest message, j walks back down; past the newest the mark clears and the window follows new messages again.
+    const moveCursor = (step: 1 | -1) => {
+      const marks = visible.filter(m => !m.system)
+      const at = cursor ? marks.findIndex(m => m.key === cursor) : marks.length
+      const to = at + step
+      if (to < 0) {
+        loadOlder($)
+        return
+      }
+      cursor = to >= marks.length ? '' : marks[to]?.key ?? ''
+      atBottom = !cursor
+      redraw()
+      if (cursor) void $.ui.scroll({ to: { key: 'msg-' + cursor }, in: PANE, block: 'nearest' }).catch(() => {})
+      else scrollToEnd($)
+    }
+
     const rule = <Text dimColor>{'─'.repeat(cols)}</Text>
     return (
       <Box flexDirection="column">
@@ -1759,6 +1782,8 @@ export const register: Register = on => {
             <Button key="write" label={t('writeButton')} plain hotkey="i"
               onPress={() => { void $.ui.focus({ requestId: PANE, key: composeKey(current.id) }).catch(() => {}) }} />
           )}
+          <Button key="nav-down" label="↓" plain dimColor hotkey="j" onPress={() => moveCursor(1)} />
+          <Button key="nav-up" label="↑" plain dimColor hotkey="k" onPress={() => moveCursor(-1)} />
         </Box>
         <Text dimColor wrap="truncate-end">{t('terminalHint')}</Text>
         <Text dimColor wrap="truncate-end">{t('terminalHint2')}</Text>

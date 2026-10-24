@@ -609,3 +609,33 @@ test('a thread is in time order even when replies were stored late, and older me
   expect(await ui.find({ key: 'older' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('terminal: j/k mark messages, the marked one takes e/x/f, and People moved to p', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const conv = 'dm:' + idOf(ahmet)
+  const inbox = [
+    { key: 'r1', conv, from: idOf(ahmet), name: 'A', text: 'gelen', at: 1000, mine: false },
+    { key: 'm1', conv, from: '', name: 'me', text: 'giden', at: 2000, mine: true },
+  ]
+  setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
+  await start($)
+  const ui = await $.ui.mount(pane('terminal'))
+  expect((await ui.find({ key: 'tab-people' }))?.props?.hotkey).toBe('p')
+  expect((await ui.find({ key: 'nav-up' }))?.props?.hotkey).toBe('k')
+  expect(await ui.find({ type: 'Text', text: /^[‹›]$/ })).toBeUndefined()
+
+  await ui.press({ key: 'nav-up' })
+  expect(await ui.find({ type: 'Text', text: /^‹$/ })).not.toBeUndefined()
+  expect((await ui.find({ key: 'edit-m1' }))?.props?.hotkey).toBe('e')
+  expect((await ui.find({ key: 'del-m1' }))?.props?.hotkey).toBe('x')
+
+  await ui.press({ key: 'nav-up' })
+  expect(await ui.find({ type: 'Text', text: /^›$/ })).not.toBeUndefined()
+  expect((await ui.find({ key: 'fwd-r1' }))?.props?.hotkey).toBe('f')
+  expect((await ui.find({ key: 'edit-m1' }))?.props?.hotkey).toBeUndefined()
+
+  await ui.press({ key: 'nav-down' })
+  await ui.press({ key: 'nav-down' })
+  expect(await ui.find({ type: 'Text', text: /^[‹›]$/ })).toBeUndefined()
+  await ui.unmount()
+})

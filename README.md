@@ -65,15 +65,19 @@ The pane is the same on every surface. Each app draws it in its own style.
 
 **Terminal**
 
-- Chats show as chips above the conversation. Press `1` to `9` to switch. The text field stays at the bottom.
+- Chats show as chips above the conversation. Press `1` to `9` to switch.
 - A bar in the sender's color marks each incoming message.
+- Press `i` to type in the text field. After you send, the focus stays in the field. Press `Tab` to leave it, or `Esc` to go back to the prompt.
+- Press `k` to mark the message above and `j` to mark the one below. On the marked message, `e` edits, `x` deletes and `f` sends it to Claude.
+- Up and Down, Page Up and Page Down, and the mouse wheel scroll the conversation. The mouse wheel needs fullscreen rendering.
 - Press `Ctrl+X` then `Tab` to focus the pane, and `Ctrl+X` then `X` to close it. In the terminal, mouse clicks on buttons work only in fullscreen rendering.
 
 **On all surfaces**
 
 - `✎` edits your message. `✕` deletes it for everyone.
 - `↗` sends an incoming message to Claude, with a note that it comes from your friend and not from you.
-- `s` opens **Chats** and `k` opens **People**.
+- A chat opens at its newest message and shows the last 30 messages. Scroll to the top, or select **older messages** (`o` in the terminal), to load 20 more.
+- `s` opens **Chats** and `p` opens **People**.
 
 ## Commands
 
