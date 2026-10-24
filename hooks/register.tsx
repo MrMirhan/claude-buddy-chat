@@ -106,6 +106,11 @@ let hiddenAbove = 0
 // Set while a chat is drawn: the ui.scroll hook then turns the scroll into paging.
 let chatShown = false
 const PAGE_STEP = 8
+// Desktop: a chat scrolls with the pane, so it holds the last DESKTOP_WINDOW messages plus the pages loaded above them.
+const DESKTOP_WINDOW = 40
+const OLDER_PAGE = 20
+let olderExtra = 0
+let newestOpen = ''
 
 const composeKey = (conv: string) => 'compose-' + conv + (composeSeq ? '-' + composeSeq : '')
 let lineCopied = false
@@ -478,6 +483,13 @@ async function refresh($: EngineInterface, quiet = false) {
     signature = next
     $.ui.invalidate('ui.render')
   }
+  // A new message in the open chat brings it to the bottom, unless the user loaded older pages to read.
+  const newest = inbox.filter(m => m.conv === selected).reduce((a, m) => (m.at >= a.at ? m : a), { key: '', at: -1 } as { key: string; at: number }).key
+  if (newest !== newestOpen) {
+    const moved = !!newestOpen
+    newestOpen = newest
+    if (moved && threadOpen && olderExtra === 0) scrollToEnd($)
+  }
 }
 
 async function setStatus($: EngineInterface, state: Status['state']) {
@@ -644,6 +656,7 @@ async function sendText($: EngineInterface, conv: string, text: string): Promise
   await addMessages($, [{ key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true }])
   newerSkip = 0
   $.ui.invalidate('ui.render')
+  scrollToEnd($)
   return result.missed.length ? { ok: false, text: partialText(result.missed), sent: true } : { ok: true, text: t('sent'), sent: true }
 }
 
@@ -809,14 +822,26 @@ async function select($: EngineInterface, conv: string) {
   selected = conv
   editing = ''
   newerSkip = 0
+  olderExtra = 0
   cursor = ''
   view = 'chats'
   threadOpen = true
   await $.store.set('readAt', readAt)
   $.ui.invalidate('ui.render')
+  scrollToEnd($)
 }
 
-// Moves the Desktop window: a positive step goes to older messages, a negative one back toward the newest.
+// Opens a Desktop chat at its newest message. In the terminal the chat is pinned to the pane and this changes nothing.
+const scrollToEnd = ($: EngineInterface) => { void $.ui.scroll({ to: 'end', in: PANE }).catch(() => {}) }
+
+// Desktop: loads a page of older messages and keeps the message that was on top in view.
+function loadOlder($: EngineInterface, anchor: string) {
+  olderExtra += OLDER_PAGE
+  $.ui.invalidate('ui.render')
+  if (anchor) void $.ui.scroll({ to: { key: 'msg-' + anchor }, in: PANE, block: 'start' }).catch(() => {})
+}
+
+// Moves the terminal window: a positive step goes to older messages, a negative one back toward the newest.
 function pageBy($: EngineInterface, step: number) {
   const next = Math.max(0, Math.min(newerSkip + step, hiddenAbove + newerSkip))
   if (next === newerSkip) return
@@ -832,6 +857,7 @@ async function closeThread($: EngineInterface) {
   threadOpen = false
   editing = ''
   newerSkip = 0
+  olderExtra = 0
   cursor = ''
   $.ui.invalidate('ui.render')
 }
@@ -1078,7 +1104,7 @@ export const register: Register = on => {
   // In the terminal the chat is drawn one row taller than the pane, so the arrows and the page keys raise ui.scroll.
   // The pane is held at the top and the scroll moves the messages instead: an arrow by one, a page key by a page.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
-    if (!chatShown || e.by === 0) return next(e)
+    if (!chatShown || e.by === 0 || e.origin?.kind !== 'person') return next(e)
     const step = Math.min(PAGE_STEP, Math.max(1, Math.round(Math.abs(e.by))))
     pageBy($, e.by < 0 ? step : -step)
     return next({ ...e, offset: 0 })
@@ -1559,51 +1585,43 @@ export const register: Register = on => {
       .sort((a, b) => a.m.at - b.m.at || a.i - b.i)
       .map(x => x.m)
     const editTarget = thread.find(m => m.key === editing && m.mine && !m.deleted)
-    const end = Math.max(0, thread.length - newerSkip)
-    // The window holds what fits between the header and the composer. Terminal rows are cells, so the count is exact;
-    // Desktop draws in pixels, so it is an estimate, a few more are drawn, and the window clips any overflow at the top.
-    const lineWidth = Math.max(10, graphic ? Math.floor(cols * (split ? 0.5 : 0.75)) : cols - 8)
+    const end = graphic ? thread.length : Math.max(0, thread.length - newerSkip)
+    // Terminal: the window holds what fits between the header and the composer; rows are cells, so the count is exact.
+    const lineWidth = Math.max(10, cols - 8)
     const linesOf = (text: string) => text.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / lineWidth)), 0)
     const rowsOf = (m: Msg, prev: Msg | undefined) => {
       const newDay = !prev || !sameDay(prev.at, m.at)
       const sameRun = !!prev && !newDay && !prev.system && !m.system && prev.from === m.from && m.at - prev.at < 5 * 60_000
-      const lines = linesOf(textOf(m))
-      // Desktop: a bubble adds its time row and padding, a day pill its margins.
-      if (graphic) return (newDay ? 3 : 0) + (m.system ? 1 : lines + 3) + (!m.mine && group && !sameRun ? 1 : 0)
-      // Terminal: an incoming message's quote bar adds a blank row above and below it.
-      return (newDay ? 1 : 0) + (m.system || sameRun ? 0 : 1) + lines + (m.system || m.mine ? 0 : 2)
+      // An incoming message's quote bar adds a blank row above and below it.
+      return (newDay ? 1 : 0) + (m.system || sameRun ? 0 : 1) + linesOf(textOf(m)) + (m.system || m.mine ? 0 : 2)
     }
     const chipRows = Math.ceil(convs.reduce((n, c) => n + c.title.length + 6, 0) / cols)
-    const room = Math.max(4, (fullHeight ?? 24) - (graphic ? 9 : 11 + chipRows))
-    let start = end
+    const room = Math.max(4, (fullHeight ?? 24) - 11 - chipRows)
+    let start = graphic ? Math.max(0, end - DESKTOP_WINDOW - olderExtra) : end
     let used = 0
-    while (start > 0) {
+    while (!graphic && start > 0) {
       const rowsNeeded = rowsOf(thread[start - 1]!, thread[start - 2])
       if (used + rowsNeeded > room && start < end) break
       used += rowsNeeded
       start--
     }
     hiddenAbove = start
-    // Desktop overdraws by a page so a low estimate never leaves a gap; the window clips the extra at the top.
-    const drawFrom = graphic ? Math.max(0, start - PAGE_STEP) : start
-    const visible = thread.slice(drawFrom, end)
+    const visible = thread.slice(start, end)
     const below = thread.length - end
     // At the start of the chat the messages hang from the top, so going back never opens a gap above them.
-    const align = drawFrom === 0 && newerSkip > 0 ? 'flex-start' : 'flex-end'
-    chatShown = view === 'chats' && (!graphic || threadOpen)
+    const align = start === 0 && newerSkip > 0 ? 'flex-start' : 'flex-end'
+    chatShown = view === 'chats' && !graphic
     const olderButton = start > 0 && (
       <Box justifyContent="center">
-        <Button key="older" label={graphic ? t('olderPage') : t('olderMessages', { count: start })} plain dimColor
-          hotkey={graphic ? 'k' : 'o'} onPress={() => pageBy($, PAGE_STEP)} />
+        <Button key="older" label={t('olderMessages', { count: start })} plain dimColor hotkey={graphic ? undefined : 'o'}
+          onPress={() => (graphic ? loadOlder($, visible[0]?.key ?? '') : pageBy($, PAGE_STEP))} />
       </Box>
     )
     // Terminal: the pane is held at offset 0, so this row is never seen; it only lets the arrows and page keys raise ui.scroll.
-    // Desktop scrolls a pane itself without telling the mod, so it gets no such row.
     const scrollRow = fullHeight && !graphic ? <Box key="scroll-row" height={1} /> : null
     const newerButton = below > 0 && (
       <Box justifyContent="center">
-        <Button key="newer" label={t('newerMessages', { count: below })} plain dimColor hotkey={graphic ? 'j' : undefined}
-          onPress={() => pageBy($, -PAGE_STEP)} />
+        <Button key="newer" label={t('newerMessages', { count: below })} plain dimColor onPress={() => pageBy($, -PAGE_STEP)} />
       </Box>
     )
     const securityLine = group
@@ -1744,9 +1762,10 @@ export const register: Register = on => {
             }} />
 
     if (graphic) {
-      const threadPane = (
-        <Box key="thread" flexDirection="column" flexGrow={1} flexShrink={1} paddingLeft={split ? 2 : 0}
-          height={fullHeight} overflow="hidden">
+      // An open chat takes the whole pane and scrolls with it: Desktop scrolls a pane itself, which the wheel needs,
+      // and the list beside it would scroll away anyway. The back button returns to the list.
+      return (
+        <Box key="thread" flexDirection="column">
           <Box flexDirection="row" columnGap={1} alignItems="center" paddingBottom={1}>
             <Button key="back" label="←" plain hotkey="b" onPress={() => closeThread($)} />
             {avatar('head-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 40)}
@@ -1754,7 +1773,7 @@ export const register: Register = on => {
               <Text size="heading" weight="semibold" wrap="truncate-end">{(current.isGroup ? '# ' : '') + current.title}</Text>
               <Text dimColor size="caption" wrap="truncate-end">{'🔒 ' + securityLine}</Text>
             </Box>
-            {!split && statusView}
+            {statusView}
           </Box>
           {olderButton}
           {thread.length === 0 && (
@@ -1765,23 +1784,8 @@ export const register: Register = on => {
               <Text dimColor>{t('sayHi')}</Text>
             </Box>
           )}
-          <Box flexDirection="column" flexGrow={1} flexShrink={1} justifyContent={align} overflow="hidden">{rowsView}</Box>
-          {newerButton}
-          <Box flexDirection="column" alignItems="stretch" width="100%" marginTop={1} flexShrink={0}>{composer}</Box>
-        </Box>
-      )
-      const body = split
-        ? (
-          <Box flexDirection="row" columnGap={1} height={fullHeight} overflow="hidden">
-            {sidebar}
-            {threadPane}
-          </Box>
-        )
-        : threadPane
-      return (
-        <Box flexDirection="column">
-          {body}
-          {scrollRow}
+          <Box flexDirection="column">{rowsView}</Box>
+          <Box flexDirection="column" alignItems="stretch" width="100%" marginTop={1}>{composer}</Box>
         </Box>
       )
     }

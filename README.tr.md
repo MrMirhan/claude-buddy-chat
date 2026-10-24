@@ -58,7 +58,8 @@ Panel her yüzeyde aynı, ama her uygulama kendi görünümüyle çizer.
 
 **Desktop ve VS Code**
 
-- Geniş panelde sohbet listesi ve açık sohbet yan yana durur. Dar panelde önce liste görünür, sohbete tıklayınca açılır.
+- Geniş panelde sohbet listesi ana sayfanın yanında durur: Buddy ID'n, arkadaş ekleme ve istekler. Sohbete tıklayınca açılır.
+- Açık sohbet tüm paneli kaplar ve fare tekerleği ya da trackpad ile kayar. En yeni mesajda açılır, son 40 mesajı gösterir. En üstteki **eski mesajlar** 20 mesaj daha yükler. `←` listeye döner.
 - Sohbet listesinde renkli avatar, son mesaj, saat ve okunmamış sayısı görünür. 5'ten fazla sohbet varsa bir arama alanı listeyi süzer.
 - Senin mesajların sağda turuncu balonlarda, gelenler solda gri balonlarda. Mesajın işlemleri, üzerine gelince görünür.
 - **Kişiler** sekmesinde profil kartın, istekler, arkadaşlar, gruplar ve engellenenler var.
@@ -77,7 +78,7 @@ Panel her yüzeyde aynı, ama her uygulama kendi görünümüyle çizer.
 
 - `✎` mesajını düzenler, `✕` herkesten siler.
 - `↗` gelen mesajı Claude'a iletir; mesajın senden değil arkadaşından geldiği notuyla.
-- Sohbet paneli doldurur ve en yeni mesajında açılır. Liste ve sohbet başlığı yerinde kalır, yazı alanı hep en altta. **Eski mesajlar** ve **yeni mesaj** butonlarıyla sohbette sayfa sayfa gezilir. Desktop'ta panel odaktayken `k` ve `j` de aynı işi yapar. Desktop uygulaması fare tekerleğini mod'lara iletmediği için tekerlek sohbeti kaydırmaz.
+- Terminalde sohbet paneli doldurur: sohbetler üstte, yazı alanı en altta kalır. **Eski mesajlar** ve **yeni mesaj** butonlarıyla sayfa sayfa gezilir.
 - `s` **Sohbetler**'i, `p` **Kişiler**'i açar.
 
 ## Komutlar

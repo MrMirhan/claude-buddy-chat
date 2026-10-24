@@ -58,7 +58,8 @@ The pane is the same on every surface. Each app draws it in its own style.
 
 **Desktop app and VS Code extension**
 
-- A wide pane shows the chat list and the open chat side by side. A narrow pane shows the list, and you select a chat to open it.
+- A wide pane shows the chat list beside your home view: your Buddy ID, adding a friend and requests. Select a chat to open it.
+- An open chat takes the whole pane and scrolls with the mouse wheel or the trackpad. It opens at the newest message and shows the last 40. Select **older messages** at the top to load 20 more. Select `←` to go back to the list.
 - The chat list shows a colored avatar, the last message, the time and the number of unread messages. With more than 5 chats, a search field filters the list.
 - Your messages show in orange bubbles on the right. Incoming messages show in grey bubbles on the left. Move the pointer over a message to show its actions.
 - The **People** tab shows your profile card, requests, friends, groups and blocked people.
@@ -77,7 +78,7 @@ The pane is the same on every surface. Each app draws it in its own style.
 
 - `✎` edits your message. `✕` deletes it for everyone.
 - `↗` sends an incoming message to Claude, with a note that it comes from your friend and not from you.
-- A chat fills the pane and opens at its newest message. The list and the chat header stay in place, and the text field stays at the bottom. Select **older messages** and **newer messages** to page through the chat. On Desktop, `k` and `j` do the same while the pane has the focus. The Desktop app does not pass the mouse wheel to mods, so the wheel does not move a chat.
+- In the terminal, a chat fills the pane: the chats stay at the top and the text field at the bottom. Select **older messages** and **newer messages** to page through it.
 - `s` opens **Chats** and `p` opens **People**.
 
 ## Commands

@@ -546,13 +546,15 @@ test('a wide desktop pane: list beside home, a chat opens beside the list, sendi
 
   await openChat(ui, 'conv-dm:' + idOf(ahmet))
   expect(await ui.find({ type: 'Text', text: /^geniş ekran mesajı$/ })).not.toBeUndefined()
-  expect(await ui.find({ key: 'conv-dm:' + idOf(veli) })).not.toBeUndefined()
+  // An open chat takes the whole pane, so it scrolls with the wheel; the list comes back with the back button.
+  expect(await ui.find({ key: 'conv-dm:' + idOf(veli) })).toBeUndefined()
   await ui.input({ key: 'compose-dm:' + idOf(ahmet), text: 'cevap' })
   expect(await ui.find({ key: 'compose-dm:' + idOf(ahmet) })).toBeUndefined()
   expect(await ui.find({ key: 'compose-dm:' + idOf(ahmet) + '-1' })).not.toBeUndefined()
 
   await ui.press({ key: 'back' })
   expect(await ui.find({ type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
+  expect(await ui.find({ key: 'conv-dm:' + idOf(veli) })).not.toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^1$/, in: 'conv-dm:' + idOf(ahmet) })).toBeUndefined()
   await ui.unmount()
 })
@@ -649,7 +651,7 @@ test('terminal: j/k mark messages, the marked one takes e/x/f, and People moved 
   await ui.unmount()
 })
 
-test('desktop: the chat fills the pane height and pages through older and newer messages', async ($, on) => {
+test('desktop: a chat holds its last 40 messages and loads 20 older ones at a time', async ($, on) => {
   const ahmet = nacl.box.keyPair()
   const conv = 'dm:' + idOf(ahmet)
   const inbox = Array.from({ length: 80 }, (_, i) =>
@@ -661,16 +663,17 @@ test('desktop: the chat fills the pane height and pages through older and newer 
   await openChat(ui, 'conv-' + conv)
   expect(await ui.find({ key: 'compose-' + conv })).not.toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^satır 79$/ })).not.toBeUndefined()
-  expect(await ui.find({ key: 'newer' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^satır 40$/ })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^satır 39$/ })).toBeUndefined()
+  expect((await ui.find({ key: 'older' }))?.text).toContain('40')
 
   await ui.press({ key: 'older' })
-  expect(await ui.find({ type: 'Text', text: /^satır 79$/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^satır 71$/ })).not.toBeUndefined()
-  expect((await ui.find({ key: 'newer' }))?.text).toContain('8')
-  expect(await ui.find({ key: 'conv-' + conv })).not.toBeUndefined()
-
-  await ui.press({ key: 'newer' })
+  expect(await ui.find({ type: 'Text', text: /^satır 20$/ })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^satır 19$/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^satır 79$/ })).not.toBeUndefined()
+  await ui.press({ key: 'older' })
+  expect(await ui.find({ type: 'Text', text: /^satır 0$/ })).not.toBeUndefined()
+  expect(await ui.find({ key: 'older' })).toBeUndefined()
   expect(await ui.find({ key: 'newer' })).toBeUndefined()
   await ui.unmount()
 })
