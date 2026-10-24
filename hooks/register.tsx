@@ -2955,7 +2955,7 @@ export const register: Register = on => {
       return (
         <Box flexDirection="row" columnGap={compact ? 0 : 1}>
         {copyButton}
-        <Button key={'fwd-' + m.key} label={graphic && !compact ? t('forwardButton') : '↗'} plain dimColor={!marked} hotkey={marked ? 'f' : undefined}
+        <Button key={'fwd-' + m.key} label={graphic ? t('forwardButton') : '↗'} plain dimColor={!marked} hotkey={marked ? 'f' : undefined}
           onPress={async () => {
             inbox = await mutate<Msg>($, 'inbox', cur => cur.map(x => (x.key === m.key ? { ...x, forwarded: true } : x)))
             redraw()
