@@ -5,7 +5,7 @@ import { ml_kem768 } from '../hooks/vendor/mlkem.js'
 
 type KP = { publicKey: Uint8Array; secretKey: Uint8Array }
 type Post = { url: string; body: string }
-type World = { feed: string[]; posts: Post[]; gets: number; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
+type World = { feed: string[]; posts: Post[]; gets: number; opens: string[]; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
 
 const enc = (s: string) => new TextEncoder().encode(s)
 const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
@@ -37,14 +37,14 @@ const sent = (w: World, kp: KP) => to(w, kp).filter(p => !['kem', 'pq', 'receipt
 
 // spawn stands in for curl; without one the stream cannot start and the poller carries the test.
 function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?: (e: { argv: string[] }) => AsyncGenerator<object>): World {
-  const w: World = { feed: [], posts: [], gets: 0, notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
+  const w: World = { feed: [], posts: [], gets: 0, opens: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
   mock.store(on, store)
   w.clock = mock.clock(on, { now: 1_800_000_000_000 })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: sessionId }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('tool.register', (_, e) => ({ value: { tool: 'mcp__buddy-chat__' + e.name } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', (_, e) => { w.opens.push((e as { id: string }).id); return { value: { isPlaced: true } } as never })
   on('ui.copy', () => ({ value: { isCopied: true } }))
   on('process.spawn', async function* (_: unknown, e: { argv: string[] }) {
     if (!spawn) throw new Error('no curl')
@@ -900,4 +900,14 @@ test('notifications: a muted chat, the open chat and the global switch stay quie
   expect(w.notes.some(n => n.includes('hiç'))).toBe(false)
   expect(w.toasts.some(n => n.includes('hiç'))).toBe(false)
   await ui.unmount()
+})
+
+test('a pane left open opens again in the next session', async ($, on) => {
+  const w = setup(on, { ...V4 })
+  await start($)
+  expect(w.opens).toEqual([])
+  await run($, 'buddy')
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await w.clock.settle()
+  expect(w.opens.length).toBe(2)
 })

@@ -1205,6 +1205,8 @@ export const register: Register = on => {
     void (async () => { for (const f of friends()) if (!f.pq) await sendKem($, f.id) })().catch(() => {})
 
     $.clock.every(POLL_MS, () => tick($))
+    // A pane is the session's: one left open in the last session opens again here, until the person closes it.
+    if ((await $.store.get('paneOpen')) === true) void $.ui.open({ id: PANE, title: 'Buddy chat' }).catch(() => {})
 
     try {
       await registerCommands($)
@@ -1228,7 +1230,14 @@ export const register: Register = on => {
 
   on('command.run', { command: 'buddy' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Buddy chat', focus: true })
+    await $.store.set('paneOpen', true)
     return {}
+  })
+
+  // Closing by hand or by the plugin keeps it closed in the next session; an unload is the session ending.
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    if (e.origin.kind !== 'unload') await $.store.set('paneOpen', false)
+    return next(e)
   })
 
   on('command.run', { command: 'buddy-id' }, async () => {
