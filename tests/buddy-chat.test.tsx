@@ -483,6 +483,8 @@ test('onboarding: name form until a name is saved, then a summary with Edit; ste
     const ui = await $.ui.mount(pane(surface))
     expect(await ui.find({ key: 'display-name' })).not.toBeUndefined()
     expect(await ui.find({ key: 'edit-profile' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /X25519|ML-KEM/ })).toBeUndefined()
     await ui.unmount()
   }
 

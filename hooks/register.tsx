@@ -1105,13 +1105,19 @@ export const register: Register = on => {
           }} />
       : <Text dimColor>{t('addHintNoInput')}</Text>
 
+    // The ID keeps to one line: on a narrow pane it is cut in the middle, and the copy buttons always copy it whole.
     const shareRow = (
-      <Box flexDirection="row" columnGap={graphic ? 1 : 2} alignItems="center" flexWrap="wrap">
-        <Button key="copy-line" label={t('copyLine')} plain={graphic ? undefined : true} variant={graphic ? 'primary' : undefined}
-          hotkey="c" onPress={async press => { await copy(addLine(), press.surface, t('copiedLine')); lineCopied = true; redraw() }} />
-        <Button key="copy-id" label={t('copyId')} plain={graphic ? undefined : true} dimColor
-          onPress={press => copy(me, press.surface, t('copiedId'))} />
-        <Text dimColor mono size="caption">{t('idShort', { id: shortId(me) })}</Text>
+      <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
+        <Box flexDirection="row" columnGap={1}>
+          <Text dimColor size="caption">{t('buddyIdLabel')}</Text>
+          <Box flexShrink={1}><Text mono size="caption" wrap="truncate-middle">{me}</Text></Box>
+        </Box>
+        <Box flexDirection="row" columnGap={graphic ? 1 : 2} alignItems="center" flexWrap="wrap">
+          <Button key="copy-line" label={t('copyLine')} plain={graphic ? undefined : true} variant={graphic ? 'primary' : undefined}
+            hotkey="c" onPress={async press => { await copy(addLine(), press.surface, t('copiedLine')); lineCopied = true; redraw() }} />
+          <Button key="copy-id" label={t('copyId')} plain={graphic ? undefined : true} dimColor
+            onPress={press => copy(me, press.surface, t('copiedId'))} />
+        </Box>
       </Box>
     )
 
