@@ -97,6 +97,9 @@ let composeSeq = 0
 let addSeq = 0
 let groupSeq = 0
 let pollerAt = 0
+// How many messages above the ones that fit the user asked to see with "older messages"; reset when the chat changes.
+let olderExtra = 0
+const OLDER_PAGE = 20
 
 const composeKey = (conv: string) => 'compose-' + conv + (composeSeq ? '-' + composeSeq : '')
 let lineCopied = false
@@ -798,6 +801,7 @@ async function select($: EngineInterface, conv: string) {
   readAt = marks
   selected = conv
   editing = ''
+  olderExtra = 0
   view = 'chats'
   threadOpen = true
   await $.store.set('readAt', readAt)
@@ -811,6 +815,7 @@ async function closeThread($: EngineInterface) {
   }
   threadOpen = false
   editing = ''
+  olderExtra = 0
   $.ui.invalidate('ui.render')
 }
 
@@ -1408,8 +1413,9 @@ export const register: Register = on => {
 
     const convColor = (c: Conv) => (c.isGroup ? '#5c7cfa' : colorOf(c.id.slice(3)))
     const lastOf = (conv: string) => {
-      for (let i = inbox.length - 1; i >= 0; i--) if (inbox[i]?.conv === conv) return inbox[i]
-      return undefined
+      let last: Msg | undefined
+      for (const m of inbox) if (m.conv === conv && (!last || m.at >= last.at)) last = m
+      return last
     }
     const previewOf = (m: Msg | undefined) =>
       !m ? t('noMessagesPreview') : m.deleted ? t('deletedMsg') : m.system ? textOf(m) : (m.mine ? t('youPrefix') : '') + m.text
@@ -1517,7 +1523,12 @@ export const register: Register = on => {
 
     const group = current.isGroup ? groups.find(g => groupConv(g.id) === current.id) : undefined
     const peer = current.isGroup ? undefined : contactOf(current.id.slice(3))
-    const thread = inbox.filter(m => m.conv === current.id)
+    // Polls bring replies in batches, so the store's order is not time order: sort by time, keeping the stored order for ties.
+    const thread = inbox
+      .map((m, i) => ({ m, i }))
+      .filter(x => x.m.conv === current.id)
+      .sort((a, b) => a.m.at - b.m.at || a.i - b.i)
+      .map(x => x.m)
     const editTarget = thread.find(m => m.key === editing && m.mine && !m.deleted)
     const room = Math.max(4, rows - (graphic ? 8 : 10))
     const width = Math.max(10, cols - 6)
@@ -1531,7 +1542,14 @@ export const register: Register = on => {
       used += height
       visible.unshift(m)
     }
+    if (olderExtra > 0) visible.splice(0, visible.length, ...thread.slice(-Math.min(thread.length, visible.length + olderExtra)))
     const hidden = thread.length - visible.length
+    const olderButton = hidden > 0 && (
+      <Box justifyContent="center">
+        <Button key="older" label={t('olderMessages', { count: hidden })} plain dimColor hotkey={graphic ? undefined : 'o'}
+          onPress={() => { olderExtra += OLDER_PAGE; redraw() }} />
+      </Box>
+    )
     const securityLine = group
       ? group.members.map(m => nameOf(m.id, m.name)).join(', ') + ' · ' + t('groupSecurity')
       : (peer ? subtitle(peer) + ' · ' : '') + security(peer)
@@ -1678,7 +1696,7 @@ export const register: Register = on => {
             </Box>
             {!split && statusView}
           </Box>
-          {hidden > 0 && <Box justifyContent="center"><Text dimColor size="caption">{t('olderMessages', { count: hidden })}</Text></Box>}
+          {olderButton}
           {thread.length === 0 && (
             <Box flexDirection="column" alignItems="center" rowGap={1} marginY={3}>
               {avatar('empty-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 72)}
@@ -1714,7 +1732,7 @@ export const register: Register = on => {
         </Box>
         {rule}
         <Text dimColor wrap="truncate-end">{securityLine}</Text>
-        {hidden > 0 && <Text dimColor>{t('olderMessages', { count: hidden })}</Text>}
+        {olderButton}
         {thread.length === 0 && <Box marginY={1}><Text dimColor>{t('emptyThread')}</Text></Box>}
         <Box flexDirection="column">{rowsView}</Box>
         {rule}

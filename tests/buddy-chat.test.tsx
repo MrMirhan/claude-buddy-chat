@@ -583,3 +583,27 @@ test('terminal: the text field does not grab the focus, and a write button with 
   await ui.press({ key: 'write' })
   await ui.unmount()
 })
+
+test('a thread is in time order even when replies were stored late, and older messages load on demand', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const conv = 'dm:' + idOf(ahmet)
+  const msg = (key: string, text: string, at: number, mine: boolean) =>
+    ({ key, conv, from: mine ? '' : idOf(ahmet), name: 'A', text, at, mine })
+  // Stored as a batch poll leaves them: both of mine first, then the reply that came in between.
+  const inbox = [msg('m1', 'ilk benim', 1000, true), msg('m2', 'son benim', 3000, true), msg('r1', 'aradaki cevap', 2000, false)]
+  setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
+  await start($)
+
+  const short = { ...pane('desktop'), props: { ...pane('desktop').props, scroll: { offset: 0, bodyRows: 12 } } }
+  const ui = await $.ui.mount(short)
+  await openChat(ui, 'conv-' + conv)
+  expect(await ui.find({ type: 'Text', text: /^son benim$/ })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^aradaki cevap$/ })).toBeUndefined()
+  expect(await ui.find({ key: 'older' })).not.toBeUndefined()
+
+  await ui.press({ key: 'older' })
+  expect(await ui.find({ type: 'Text', text: /^aradaki cevap$/ })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^ilk benim$/ })).not.toBeUndefined()
+  expect(await ui.find({ key: 'older' })).toBeUndefined()
+  await ui.unmount()
+})
