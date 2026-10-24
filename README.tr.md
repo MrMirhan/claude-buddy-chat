@@ -14,6 +14,8 @@ buddy-chat bir Claude Code [mod'u](https://code.claude.com/docs/en/plugins/mods/
 - Kendi mesajını herkesten düzenleme ve silme; her mesajı kopyalama
 - Mesaj durumları: gönderiliyor ◷, gönderildi ✓, iletildi ✓✓, okundu (mavi ✓✓)
 - Birebir sohbetlerde "yazıyor…" göstergesi
+- Birden çok bilgisayarda tek hesap: cihaz bağla, mesajlar ve ayarlar cihazların arasında eşitlensin
+- Onaylanmayan mesajlar 7 güne kadar yeniden gönderilir; 12 saatten uzun ortada olmayan arkadaşa da ulaşır
 - Okundu bilgisi ve yazıyor göstergesi için gizlilik ayarları. Okundu bilgisi kapalıyken ne gönderirsin ne görürsün.
 - Arkadaşlıktan çıkarma (karşı taraf bilgilendirilir) ve engelleme (bilgilendirilmez)
 - Yeni mesaj ve istekler için toast ve işletim sistemi bildirimi. Hepsi için bir aç/kapa ve her sohbet için sessize alma düğmesi var. Ekranda açık olan sohbet bildirim göstermez.
@@ -109,6 +111,7 @@ Panel her yüzeyde aynı, ama her uygulama kendi görünümüyle çizer.
 | `/buddy-send <kişi ya da grup> <mesaj>` | Mesaj gönder |
 | `/buddy-group <ad> <kişi1> [kişi2 ...]` | Grup kur |
 | `/buddy-lang <en ya da tr>` | Dili ayarla |
+| `/buddy-link [kod]` | Kodsuz: yeni cihazda bir kod göster. Kodla: o cihazı hesabına bağla |
 
 Bir kişiyi takma adıyla, görünen adıyla ya da `@kullanıcıadı` ile anabilirsin.
 
@@ -132,6 +135,8 @@ Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da *
 - **Gruplar.** Her grup mesajı her üyeye ayrı şifrelenip gönderilir. Arkadaşın olan üyelere kuantuma dayanıklı anahtarla, olmayanlara X25519 ile. Üyeleri sadece grubu kuran değiştirebilir.
 - **Düzenleme ve silme.** Değişikliği arkadaşının plugin'i uygular. Ekran görüntüsünü ya da değiştirilmiş bir istemciyi geri alamaz.
 - **Okundu bilgisi ve yazıyor.** İletildi ve okundu bilgileri ile yazıyor sinyali de şifreli mesajdır. Bir bilgi, sadece mesajın gittiği kişiden geldiyse sayılır.
+- **Yeniden gönderme.** Okundu bilgisi gönderen bir sürümdeki arkadaş bir mesajı onaylamazsa buddy-chat onu 11 saatte bir, en fazla 7 gün boyunca yeniden gönderir. Arkadaşının plugin'i zaten aldığı kopyayı atar.
+- **Bağlı cihazlar.** Yeni cihazda **Kişiler → Cihazlar → Yeni cihaz bu**'yu seç (ya da `/buddy-link` çalıştır). Kodu hesabının olduğu cihaza yapıştır. O cihaz anahtarlarını, kişilerini, gruplarını, ayarlarını ve son mesajlarını koddan türeyen bir anahtarla şifreler ve sadece kodun bildiği bir topic'e bırakır. Yeni cihaz bunları açar ve aynı kimliği kullanır. Sonrasında her cihaz değişenlerin (gönderilen mesajlar, düzenlemeler, kişiler, ayarlar) şifreli bir kopyasını kendi topic'ine bırakır. 5 dakikadan uzun ortada olmayan bir cihaz kaçırdıklarını diğerlerinden ister. ML-KEM el sıkışmalarını kimliği ilk oluşturan cihaz yapar; iki cihaz yapsa iki farklı anahtar çıkar.
 
 ## Güvenlik sınırları
 
@@ -139,11 +144,12 @@ Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da *
 - **Üst veri görünür.** ntfy.sh hangi topic'e ne zaman, hangi IP'den, ne büyüklükte mesaj geldiğini görür.
 - **Üçüncü taraf kod.** TweetNaCl.js Cure53 tarafından denetlendi. noble-post-quantum bağımsız denetimden geçmedi, sadece yazarı denetledi. buddy-chat ikisini birlikte bu yüzden kullanıyor.
 - **Denetlenmedi.** buddy-chat'in kendisi güvenlik denetiminden geçmedi.
+- **Bağlama kodu hesabının kendisidir.** Kodu 10 dakikalık süresi içinde ele geçiren ve relay'i 12 saat içinde okuyan biri anlık görüntüyü açabilir. Kodu sadece kendine gönder. Bağlı cihazlar tek kimliği paylaşır; yeni bir kimlik oluşturmadan tek bir cihazı çıkaramazsın.
 
 ## Sınırlar
 
 - ntfy.sh her IP'ye 60 istek verir, sonra 5 saniyede bir istek ekler. HTTP 429 gelirse buddy-chat bir dakika bekler.
-- ntfy.sh mesajları 12 saat saklar. O süre içinde hiç oturum açmayan kişiye mesaj ulaşmaz.
+- ntfy.sh mesajları 12 saat saklar. buddy-chat onaylanmayan mesajları 7 güne kadar yeniden gönderir, ama sadece 0.10 ve sonrasındaki arkadaşlara. Daha eski sürümdeki biri 12 saat içinde oturum açmazsa mesaj kaybolur.
 - Bir mesaj yaklaşık 2.500 karakter alır.
 - Her grup mesajı, düzenleme ve silme üye başına bir istek harcar.
 - Okundu bilgileri ve yazıyor sinyali de istek harcar. buddy-chat her mesaj grubu için tek bir bilgi, en fazla 5 saniyede bir yazıyor sinyali gönderir. Gruplarda yazıyor göstergesi yok.

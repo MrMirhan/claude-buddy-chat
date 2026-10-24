@@ -5,7 +5,7 @@ import { ml_kem768 } from '../hooks/vendor/mlkem.js'
 
 type KP = { publicKey: Uint8Array; secretKey: Uint8Array }
 type Post = { url: string; body: string }
-type World = { feed: string[]; posts: Post[]; gets: number; opens: string[]; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
+type World = { feed: string[]; linkFeed: string[]; posts: Post[]; gets: number; opens: string[]; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
 
 const enc = (s: string) => new TextEncoder().encode(s)
 const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
@@ -37,7 +37,7 @@ const sent = (w: World, kp: KP) => to(w, kp).filter(p => !['kem', 'pq', 'receipt
 
 // spawn stands in for curl; without one the stream cannot start and the poller carries the test.
 function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?: (e: { argv: string[] }) => AsyncGenerator<object>): World {
-  const w: World = { feed: [], posts: [], gets: 0, opens: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
+  const w: World = { feed: [], linkFeed: [], posts: [], gets: 0, opens: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
   mock.store(on, store)
   w.clock = mock.clock(on, { now: 1_800_000_000_000 })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -63,7 +63,8 @@ function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?:
       return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
     }
     w.gets++
-    const lines = w.feed.splice(0).map(m => JSON.stringify({ id: 'ev' + n++, event: 'message', time: 1_800_000_000, message: m }))
+    const source = e.url.includes('buddy-chat-link-') ? w.linkFeed : w.feed
+    const lines = source.splice(0).map(m => JSON.stringify({ id: 'ev' + n++, event: 'message', time: 1_800_000_000, message: m }))
     return { value: { status: 200, ok: true, headers: {}, text: lines.join('\n') } }
   })
   return w
@@ -910,4 +911,105 @@ test('a pane left open opens again in the next session', async ($, on) => {
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await w.clock.settle()
   expect(w.opens.length).toBe(2)
+})
+
+const linkKeyOf = (secret: Uint8Array) => nacl.hash(new Uint8Array([...secret, ...enc('buddy-chat link v1')])).slice(0, 32)
+const linkTopicOf = (secret: Uint8Array) => 'https://ntfy.sh/buddy-chat-link-' + hex(nacl.hash(new Uint8Array([...secret, ...enc('buddy-chat link topic')]))).slice(0, 32)
+
+test('resend: a message nobody confirmed goes out again after 11 hours, only to people who send receipts', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const veli = nacl.box.keyPair()
+  const mine = nacl.box.keyPair()
+  const now = 1_800_000_000_000
+  const inbox = [
+    { key: 'a1a1a1a1a1a1a1a1', conv: 'dm:' + idOf(ahmet), from: idOf(mine), name: 'Ben', text: 'kayıp mı', at: now - 11.5 * 3_600_000, mine: true },
+    { key: 'b1b1b1b1b1b1b1b1', conv: 'dm:' + idOf(veli), from: idOf(mine), name: 'Ben', text: 'eski sürüm', at: now - 11.5 * 3_600_000, mine: true },
+  ]
+  const w = setup(on, { ...V4, secretKey: b64(mine.secretKey), contacts: [{ ...friend(ahmet, 'Ahmet'), acks: true }, friend(veli, 'Veli')], inbox })
+  await start($)
+  await w.clock.advance(8000)
+  const again = sent(w, ahmet).map(p => opened(p, ahmet)).filter(p => p?.t === 'dm')
+  expect(again).toEqual([expect.objectContaining({ id: 'a1a1a1a1a1a1a1a1', text: 'kayıp mı' })])
+  expect(sent(w, veli).length).toBe(0)
+  await w.clock.advance(8000)
+  expect(sent(w, ahmet).filter(p => opened(p, ahmet)?.t === 'dm').length).toBe(1)
+})
+
+test('link, old device: the code gets a sealed snapshot of the identity, contacts and messages', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const mine = nacl.box.keyPair()
+  const w = setup(on, { ...V4, secretKey: b64(mine.secretKey), contacts: [friend(ahmet, 'Ahmet')],
+    inbox: [{ key: 'c1c1c1c1c1c1c1c1', conv: 'dm:' + idOf(ahmet), from: idOf(ahmet), name: 'A', text: 'merhaba', at: 1000, mine: false }] })
+  await start($)
+  const secret = nacl.randomBytes(32)
+  w.answer.value = 'Bağla'
+  const reply = await run($, 'buddy-link', 'buddylink-' + b64(secret))
+  expect(reply.text).toContain('Gönderildi')
+  const frames = w.posts.filter(p => p.url === linkTopicOf(secret)).map(p => JSON.parse(p.body))
+  expect(frames.length).toBeGreaterThan(0)
+  const bytes = frames.sort((a, b) => a.i - b.i).flatMap(f => [...nacl.secretbox.open(unb64(f.box), unb64(f.nonce), linkKeyOf(secret))!])
+  const snap = JSON.parse(new TextDecoder().decode(new Uint8Array(bytes)))
+  expect(snap.secretKey).toBe(b64(mine.secretKey))
+  expect(snap.contacts.map((c: { id: string }) => c.id)).toEqual([idOf(ahmet)])
+  expect(snap.inbox.map((m: { text: string }) => m.text)).toEqual(['merhaba'])
+  // Nothing readable goes to the relay.
+  expect(w.posts.some(p => p.body.includes('merhaba'))).toBe(false)
+})
+
+test('link, new device: the snapshot replaces the identity and keeps the history quiet', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const old = nacl.box.keyPair()
+  const w = setup(on, { ...V4 })
+  const before = await start($)
+  const reply = await run($, 'buddy-link')
+  const code = /buddylink-([A-Za-z0-9_-]{43})/.exec(reply.text ?? '')![1]!
+  const secret = unb64(code)
+  const snap = {
+    v: 1, secretKey: b64(old.secretKey), kemSeed: b64(nacl.randomBytes(64)), lastSeen: 'ev7', lang: 'tr',
+    contacts: [friend(ahmet, 'Ahmet')], groups: [], gone: {}, blocked: [], profile: { username: 'deniz', displayName: 'Deniz' },
+    muted: [], privacy: { readReceipts: true, typing: true, notifications: true }, readAt: {}, at: {},
+    inbox: [{ key: 'd1d1d1d1d1d1d1d1', conv: 'dm:' + idOf(ahmet), from: idOf(ahmet), name: 'A', text: 'eski mesaj', at: 1000, mine: false }],
+  }
+  const bytes = enc(JSON.stringify(snap))
+  const n = Math.ceil(bytes.length / 300)
+  for (let i = 0; i < n; i++) {
+    const nonce = nacl.randomBytes(24)
+    const box = nacl.secretbox(bytes.slice(i * 300, (i + 1) * 300), nonce, linkKeyOf(secret))
+    w.linkFeed.push(JSON.stringify({ v: 1, set: 'x', i, n, nonce: b64(nonce), box: b64(box) }))
+  }
+  await w.clock.advance(8000)
+  const after = /(?:ID'n|ID): (\S{43})/.exec((await run($, 'buddy-id')).text ?? '')?.[1]
+  expect(after).toBe(idOf(old))
+  expect(after).not.toBe(before)
+  expect(await list($)).toContain('Ahmet')
+  expect(w.toasts.some(t => t.includes('eski mesaj'))).toBe(false)
+  expect(w.toasts.some(t => t.includes('hesabını kullanıyor'))).toBe(true)
+})
+
+test('linked devices: sent copies, missed-message requests and state from the primary', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const mine = nacl.box.keyPair()
+  const me = idOf(mine)
+  const w = setup(on, { ...V4, secretKey: b64(mine.secretKey), linked: true, primary: false, activeAt: 1_800_000_000_000, contacts: [friend(ahmet, 'Ahmet')] })
+  await start($)
+  const self = (payload: object) => envelope(mine, me, { t: 'self', id: 's' + Math.random(), dev: 'other-device', ...payload })
+
+  w.feed.push(self({ kind: 'sent', msg: { key: 'e1e1e1e1e1e1e1e1', conv: 'dm:' + idOf(ahmet), from: me, name: 'Ben', text: 'öbür cihazdan', at: 2000, mine: true } }))
+  w.feed.push(self({ kind: 'state', primary: true, state: {
+    contacts: [{ ...friend(ahmet, 'Kanka'), pq: b64(nacl.randomBytes(32)), changed: 5 }], groups: [], gone: {}, blocked: [],
+    profile: { username: '', displayName: '' }, muted: [], privacy: { readReceipts: true, typing: true, notifications: true }, readAt: {}, at: {},
+  } }))
+  await w.clock.advance(8000)
+  const ui = await $.ui.mount(pane('desktop'))
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
+  expect(await shows(ui, { type: 'Text', text: /^öbür cihazdan$/ })).toBeDefined()
+  expect(await list($)).toContain('Kanka')
+  expect(await list($)).toContain('kuantuma dayanıklı')
+  await ui.unmount()
+
+  // Another device asks for what it missed; this one answers with its messages, sealed for itself.
+  w.feed.push(self({ kind: 'want', since: 0 }))
+  await w.clock.advance(8000)
+  const answers = w.posts.filter(p => p.url === topicOf(me)).map(p => opened(p, mine)).filter(p => p?.t === 'self')
+  expect(answers.some(p => p.kind === 'have' || p.kind === 'part')).toBe(true)
 })

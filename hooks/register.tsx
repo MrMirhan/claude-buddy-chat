@@ -28,6 +28,18 @@ const TYPING_SEND_MS = 5000
 const TYPING_SHOW_MS = 9000
 const MSG_KEY_RE = /^[0-9a-f]{16}$/
 const MAX_REFS = 60
+// ntfy keeps a message 12 hours; a message nobody confirmed goes out again before that, for up to a week.
+const RETRY_MS = 11 * 3_600_000
+const RETRY_MAX_MS = 7 * 86_400_000
+const RETRY_PER_TICK = 5
+// Linked devices: a device back after this long asks the others for what it missed.
+const CATCHUP_GAP_MS = 5 * 60_000
+const CATCHUP_MAX = 100
+const LINK_TTL_MS = 10 * 60_000
+const LINK_RE = /buddylink-([A-Za-z0-9_-]{43})/
+// A payload longer than this goes out in parts; each sealed part stays under ntfy's 4096-byte limit.
+const PART_CHARS = 2000
+const SNAPSHOT_MAX_CHARS = 60_000
 const BACKOFF_MS = 60_000
 // ntfy turns a body over 4096 bytes into an attachment, which the poller cannot read.
 const MAX_BODY_BYTES = 3800
@@ -50,9 +62,13 @@ type Contact = {
   at: number
   pq?: string
   pqPrev?: string
+  // When this device last changed the entry; linked devices keep the newer one.
+  changed?: number
+  // They have sent a receipt, so they run a version that confirms delivery and a resend is worth it.
+  acks?: boolean
 }
 type Member = { id: string; name: string }
-type Group = { id: string; title: string; owner: string; members: Member[] }
+type Group = { id: string; title: string; owner: string; members: Member[]; changed?: number }
 type Sys = { key: Key; vars?: Vars }
 type Msg = {
   key: string
@@ -74,6 +90,9 @@ type Msg = {
   readBy?: string[]
   // Theirs: shown in an open chat, so its read receipt is sent (or, with receipts off, never will be).
   seen?: boolean
+  // Mine: the device that sent it, and when it last went out again.
+  dev?: string
+  tried?: number
 }
 type Notice = { key: string; sys: Sys }
 type Envelope = { v: number; from: string; nonce: string; box: string; h?: number }
@@ -90,6 +109,32 @@ type Payload =
   | { t: 'leave'; id: string; g: string; name: string }
   | { t: 'receipt'; id: string; kind: ReceiptKind; refs: string[] }
   | { t: 'typing'; id: string }
+  | SelfPayload
+// Messages a device seals for itself, to the shared topic, for the other devices linked to the same identity.
+type SelfPayload = {
+  t: 'self'
+  id: string
+  dev: string
+  kind: 'part' | 'sent' | 'patch' | 'state' | 'want' | 'have'
+  set?: string; i?: number; n?: number; data?: string
+  msg?: Msg; msgs?: Msg[]
+  ref?: string; patch?: { text?: string; edited?: boolean; deleted?: boolean }
+  state?: SyncState
+  since?: number
+  primary?: boolean
+}
+// The settings a person changes by hand. Lists merge entry by entry; single values go to the newest.
+type SyncState = {
+  contacts: Contact[]
+  groups: Group[]
+  gone: Record<string, number>
+  blocked: string[]
+  profile: Profile
+  muted: string[]
+  privacy: Privacy
+  readAt: Record<string, number>
+  at: Record<'blocked' | 'profile' | 'muted' | 'privacy', number>
+}
 type Status = { state: 'ok' | 'limited' | 'error'; at: number }
 type Conv = { id: string; title: string; isGroup: boolean; last: number; unread: number }
 type PostError = { code: 'tooLong' | 'limited' | 'http' | 'net'; detail: string }
@@ -109,6 +154,16 @@ let readAt: Record<string, number> = {}
 let status: Status | undefined
 let privacy: Privacy = { readReceipts: true, typing: true, notifications: true }
 let muted: string[] = []
+// Device linking. deviceId stays on this machine; primary: the device the identity was made on, the one that runs
+// ML-KEM encapsulation, since two devices encapsulating would agree on two different keys.
+let deviceId = ''
+let primary = true
+let linked = false
+let gone: Record<string, number> = {}
+let stateAt: SyncState['at'] = { blocked: 0, profile: 0, muted: 0, privacy: 0 }
+let linkPending: { secret: string; until: number } | undefined
+const parts = new Map<string, string[]>()
+let currentStream: { return?: () => unknown } | undefined
 let typing: Typing[] = []
 // Receipts wait here until the batch they arrived in is handled, then go out one post per person and kind.
 const receiptQueue = new Map<string, Set<string>>()
@@ -126,6 +181,7 @@ let filter = ''
 // Bumped after a send so the text field is drawn fresh and empty; a field keeps what was typed while its value stays the same.
 let composeSeq = 0
 let addSeq = 0
+let linkSeq = 0
 let groupSeq = 0
 let pollerAt = 0
 // Terminal: the message j/k marked; its actions take one key (e, x, f). Empty: no mark.
@@ -288,7 +344,7 @@ function parseEnvelope(message: string): Envelope | undefined {
   let env: Envelope
   try { env = JSON.parse(message) } catch { return undefined }
   if (!env || typeof env !== 'object' || env.v !== WIRE_VERSION) return undefined
-  if (typeof env.from !== 'string' || !ID_RE.test(env.from) || env.from === me) return undefined
+  if (typeof env.from !== 'string' || !ID_RE.test(env.from)) return undefined
   return typeof env.nonce === 'string' && typeof env.box === 'string' ? env : undefined
 }
 
@@ -304,12 +360,26 @@ async function mutate<T>($: EngineInterface, key: string, fn: (current: T[]) => 
 }
 
 async function saveContact($: EngineInterface, contact: Contact) {
-  contacts = await mutate<Contact>($, 'contacts', cur => [...cur.filter(c => c.id !== contact.id), contact])
+  const changed = await $.clock.now()
+  contacts = await mutate<Contact>($, 'contacts', cur => [...cur.filter(c => c.id !== contact.id), { ...contact, changed }])
 }
 
 async function dropContact($: EngineInterface, id: string) {
   contacts = await mutate<Contact>($, 'contacts', cur => cur.filter(c => c.id !== id))
+  await markGone($, id)
   if (selected === convOf(id)) selected = ''
+}
+
+// A removed contact or group, so a linked device that still has it drops it too.
+async function markGone($: EngineInterface, id: string) {
+  const saved = (await $.store.get('gone')) as Record<string, number> | undefined
+  gone = { ...(saved && typeof saved === 'object' ? saved : {}), [id]: await $.clock.now() }
+  await $.store.set('gone', gone)
+}
+
+async function touchState($: EngineInterface, field: keyof SyncState['at']) {
+  stateAt = { ...stateAt, [field]: await $.clock.now() }
+  await $.store.set('stateAt', stateAt)
 }
 
 async function addMessages($: EngineInterface, msgs: Msg[]) {
@@ -352,6 +422,8 @@ async function flushReceipts($: EngineInterface) {
 
 // A receipt counts only from someone the message went to; read implies delivered.
 async function ackMessages($: EngineInterface, from: string, kind: ReceiptKind, refs: string[]) {
+  const c = contactOf(from)
+  if (c && !c.acks) await saveContact($, { ...c, acks: true })
   const keys = new Set(refs)
   inbox = await mutate<Msg>($, 'inbox', current =>
     current.map(m => {
@@ -397,17 +469,383 @@ async function sendTyping($: EngineInterface, conv: string, value: string) {
 
 async function toggleMute($: EngineInterface, conv: string) {
   muted = await mutate<string>($, 'muted', current => (current.includes(conv) ? current.filter(c => c !== conv) : [...current, conv]))
+  await touchState($, 'muted')
+  void syncState($).catch(() => {})
   $.ui.invalidate('ui.render')
 }
 
 async function setPrivacy($: EngineInterface, patch: Partial<Privacy>) {
   privacy = { ...privacy, ...patch }
   await $.store.set('privacy', privacy)
+  await touchState($, 'privacy')
+  void syncState($).catch(() => {})
   if (!privacy.typing) typing = []
   $.ui.invalidate('ui.render')
 }
 
 // Only the polling session calls this, so each machine gets one OS notification.
+// ---- Linked devices ----
+
+const CONV_RE = /^(dm:[A-Za-z0-9_-]{43}|g:[0-9a-f]{16})$/
+const idList = (value: unknown) => asArray<unknown>(value).filter((x): x is string => typeof x === 'string' && ID_RE.test(x))
+
+function cleanMsg(value: unknown): Msg | undefined {
+  const m = value as Partial<Msg> | null
+  if (!m || typeof m.key !== 'string' || m.key.length > 64 || typeof m.conv !== 'string' || !CONV_RE.test(m.conv) || typeof m.at !== 'number') return undefined
+  const from = typeof m.from === 'string' ? m.from : ''
+  const sys = m.sys && typeof m.sys === 'object' && isKey(m.sys.key) ? m.sys : undefined
+  return {
+    key: m.key, conv: m.conv, from, name: cleanText(String(m.name ?? ''), 40), text: String(m.text ?? '').slice(0, 4000), at: m.at,
+    mine: !!from && from === me,
+    ...(m.system ? { system: true } : {}),
+    ...(sys ? { sys } : {}),
+    ...(m.edited ? { edited: true } : {}),
+    ...(m.deleted ? { deleted: true } : {}),
+    ...(m.forwarded ? { forwarded: true } : {}),
+    ...(m.seen ? { seen: true } : {}),
+    ...(m.deliveredTo ? { deliveredTo: idList(m.deliveredTo) } : {}),
+    ...(m.readBy ? { readBy: idList(m.readBy) } : {}),
+    ...(typeof m.dev === 'string' ? { dev: m.dev.slice(0, 32) } : {}),
+  }
+}
+
+function cleanContact(value: unknown): Contact | undefined {
+  const c = value as Partial<Contact> | null
+  if (!c || typeof c.id !== 'string' || !ID_RE.test(c.id) || c.id === me) return undefined
+  if (c.state !== 'friend' && c.state !== 'outgoing' && c.state !== 'incoming') return undefined
+  return {
+    id: c.id, state: c.state, profile: cleanProfile(c.profile), at: typeof c.at === 'number' ? c.at : 0,
+    ...(typeof c.nickname === 'string' && c.nickname ? { nickname: cleanText(c.nickname, 40) } : {}),
+    ...(typeof c.pq === 'string' ? { pq: c.pq } : {}),
+    ...(typeof c.pqPrev === 'string' ? { pqPrev: c.pqPrev } : {}),
+    ...(typeof c.changed === 'number' ? { changed: c.changed } : {}),
+    ...(c.acks ? { acks: true } : {}),
+  }
+}
+
+function cleanGroup(value: unknown): Group | undefined {
+  const g = value as Partial<Group> | null
+  if (!g || typeof g.id !== 'string' || !GROUP_RE.test(g.id) || typeof g.owner !== 'string' || !ID_RE.test(g.owner)) return undefined
+  return {
+    id: g.id, title: cleanText(String(g.title ?? ''), 40) || t('groupFallbackTitle'), owner: g.owner, members: cleanMembers(g.members),
+    ...(typeof g.changed === 'number' ? { changed: g.changed } : {}),
+  }
+}
+
+function numberMap(value: unknown): Record<string, number> {
+  const out: Record<string, number> = {}
+  if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) if (typeof v === 'number') out[k] = v
+  return out
+}
+
+const currentState = (): SyncState => ({ contacts, groups, gone, blocked, profile, muted, privacy, readAt, at: stateAt })
+
+// Seals a payload for our own topic. A long one goes in parts that the other devices put back together.
+async function postSelf($: EngineInterface, payload: Omit<SelfPayload, 't' | 'id' | 'dev'>) {
+  const full: SelfPayload = { t: 'self', id: newId(), dev: deviceId, ...payload }
+  const json = JSON.stringify(full)
+  if (json.length <= PART_CHARS) {
+    await post($, me, full)
+    return
+  }
+  const set = newId()
+  const n = Math.ceil(json.length / PART_CHARS)
+  for (let i = 0; i < n; i++) {
+    await post($, me, { t: 'self', id: newId(), dev: deviceId, kind: 'part', set, i, n, data: json.slice(i * PART_CHARS, (i + 1) * PART_CHARS) })
+  }
+}
+
+async function syncState($: EngineInterface) {
+  if (linked) await postSelf($, { kind: 'state', state: currentState(), primary })
+}
+
+async function receiveSelf($: EngineInterface, p: SelfPayload) {
+  if (!linked || typeof p.dev !== 'string' || p.dev === deviceId) return
+  switch (p.kind) {
+    case 'part': {
+      const { set, i, n, data } = p
+      if (typeof set !== 'string' || typeof data !== 'string' || !Number.isInteger(i) || !Number.isInteger(n)) return
+      if (n! < 1 || n! > 200 || i! < 0 || i! >= n!) return
+      const got = parts.get(set) ?? Array.from({ length: n! }, () => '')
+      got[i!] = data
+      parts.set(set, got)
+      if (got.some(x => !x)) return
+      parts.delete(set)
+      let whole: SelfPayload
+      try { whole = JSON.parse(got.join('')) } catch { return }
+      if (whole?.t === 'self' && whole.kind !== 'part' && whole.dev === p.dev) await receiveSelf($, whole)
+      return
+    }
+    case 'sent': {
+      const m = cleanMsg(p.msg)
+      if (m?.mine) {
+        shown.add(m.key)
+        await addMessages($, [m])
+      }
+      return
+    }
+    case 'patch': {
+      if (typeof p.ref !== 'string' || !p.patch) return
+      const patch: Partial<Msg> = {}
+      if (typeof p.patch.text === 'string') patch.text = p.patch.text.slice(0, 4000)
+      if (p.patch.edited) patch.edited = true
+      if (p.patch.deleted) patch.deleted = true
+      await patchMessage($, p.ref, me, patch)
+      return
+    }
+    case 'state':
+      if (p.state) await mergeState($, p.state, p.primary === true)
+      return
+    case 'want': {
+      if (typeof p.since !== 'number') return
+      const msgs = inbox.filter(m => m.at >= p.since!).slice(-CATCHUP_MAX)
+      await postSelf($, { kind: 'have', msgs, state: currentState(), primary })
+      return
+    }
+    case 'have': {
+      const msgs = asArray<unknown>(p.msgs).map(cleanMsg).filter((m): m is Msg => !!m)
+      // What another device kept while this one was away is history here, not news.
+      for (const m of msgs) shown.add(m.key)
+      await addMessages($, msgs)
+      if (p.state) await mergeState($, p.state, p.primary === true)
+      return
+    }
+  }
+}
+
+// Lists merge entry by entry, the newer change winning; a removal wins over older entries.
+async function mergeState($: EngineInterface, st: SyncState, fromPrimary: boolean) {
+  const theirGone = numberMap(st.gone)
+  const saved = numberMap(await $.store.get('gone'))
+  for (const [id, at] of Object.entries(theirGone)) if (at > (saved[id] ?? 0)) saved[id] = at
+  gone = saved
+  await $.store.set('gone', gone)
+  const alive = <T extends { id: string; changed?: number }>(x: T) => !(gone[x.id] && gone[x.id]! >= (x.changed ?? 0))
+
+  const theirContacts = asArray<unknown>(st.contacts).map(cleanContact).filter((c): c is Contact => !!c)
+  contacts = await mutate<Contact>($, 'contacts', current => {
+    const out = new Map(current.map(c => [c.id, c]))
+    for (const c of theirContacts) {
+      const mine = out.get(c.id)
+      let next = !mine || (c.changed ?? 0) > (mine.changed ?? 0) ? c : mine
+      // Only the primary runs encapsulation, so its ML-KEM keys win and another device's copy never replaces them.
+      if (fromPrimary && c.pq) next = { ...next, pq: c.pq, pqPrev: c.pqPrev }
+      else if (!fromPrimary && mine) next = { ...next, pq: mine.pq, pqPrev: mine.pqPrev }
+      out.set(c.id, next)
+    }
+    return [...out.values()].filter(alive)
+  })
+  const theirGroups = asArray<unknown>(st.groups).map(cleanGroup).filter((g): g is Group => !!g)
+  groups = await mutate<Group>($, 'groups', current => {
+    const out = new Map(current.map(g => [g.id, g]))
+    for (const g of theirGroups) {
+      const mine = out.get(g.id)
+      if (!mine || (g.changed ?? 0) > (mine.changed ?? 0)) out.set(g.id, g)
+    }
+    return [...out.values()].filter(alive)
+  })
+
+  const at = numberMap(st.at)
+  if ((at.blocked ?? 0) > stateAt.blocked) {
+    blocked = idList(st.blocked)
+    await $.store.set('blocked', blocked)
+  }
+  if ((at.profile ?? 0) > stateAt.profile) {
+    profile = cleanProfile(st.profile)
+    await $.store.set('profile', profile)
+    await $.store.set('profileSent', JSON.stringify(profile))
+  }
+  if ((at.muted ?? 0) > stateAt.muted) {
+    muted = asArray<unknown>(st.muted).filter((c): c is string => typeof c === 'string' && CONV_RE.test(c))
+    await $.store.set('muted', muted)
+  }
+  if ((at.privacy ?? 0) > stateAt.privacy && st.privacy && typeof st.privacy === 'object') {
+    privacy = { readReceipts: st.privacy.readReceipts !== false, typing: st.privacy.typing !== false, notifications: st.privacy.notifications !== false }
+    await $.store.set('privacy', privacy)
+  }
+  stateAt = {
+    blocked: Math.max(stateAt.blocked, at.blocked ?? 0), profile: Math.max(stateAt.profile, at.profile ?? 0),
+    muted: Math.max(stateAt.muted, at.muted ?? 0), privacy: Math.max(stateAt.privacy, at.privacy ?? 0),
+  }
+  await $.store.set('stateAt', stateAt)
+  const theirRead = numberMap(st.readAt)
+  const marks = { ...readAt }
+  for (const [conv, when] of Object.entries(theirRead)) if (CONV_RE.test(conv) && when > (marks[conv] ?? 0)) marks[conv] = when
+  readAt = marks
+  await $.store.set('readAt', readAt)
+  $.ui.invalidate('ui.render')
+}
+
+// A message the recipient never confirmed goes out again before ntfy drops the last copy, for up to a week.
+// Only to people whose version sends receipts, and only from the device that sent it.
+async function retryUnconfirmed($: EngineInterface) {
+  const now = await $.clock.now()
+  let budget = RETRY_PER_TICK
+  for (const m of inbox) {
+    if (!budget) break
+    if (!m.mine || m.system || m.deleted || m.state || now - m.at > RETRY_MAX_MS || now - (m.tried ?? m.at) < RETRY_MS) continue
+    if (m.dev ? m.dev !== deviceId : !primary) continue
+    const targets = recipients(m.conv).filter(r => !m.deliveredTo?.includes(r.id) && contactOf(r.id)?.acks)
+    if (!targets.length) continue
+    budget--
+    const group = groups.find(g => groupConv(g.id) === m.conv)
+    for (const r of targets) {
+      await post($, r.id, group ? { t: 'group', id: m.key, g: group.id, name: myPublicName(), text: m.text } : { t: 'dm', id: m.key, name: myPublicName(), text: m.text })
+    }
+    await patchMessage($, m.key, me, { tried: now })
+  }
+}
+
+function joinBytes(...chunks: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0))
+  let at = 0
+  for (const c of chunks) {
+    out.set(c, at)
+    at += c.length
+  }
+  return out
+}
+
+// The link code is a 32-byte secret: its hash names a one-off topic, and a second hash keys the snapshot.
+const linkKey = (secret: Uint8Array) => nacl.hash(joinBytes(secret, encode('buddy-chat link v1'))).slice(0, 32)
+const linkTopic = (secret: Uint8Array) => RELAY + '/buddy-chat-link-' + hex(nacl.hash(joinBytes(secret, encode('buddy-chat link topic')))).slice(0, 32)
+const linkCode = () => (linkPending ? 'buddylink-' + linkPending.secret : '')
+
+// On the new device: wait for a snapshot. Its own identity is replaced when the snapshot arrives.
+async function startLink($: EngineInterface): Promise<string> {
+  if (contacts.length && !(await confirm($, t('linkReplaceConfirm'), t('linkReplaceYes')))) return t('linkCancelled')
+  linkPending = { secret: b64(nacl.randomBytes(32)), until: (await $.clock.now()) + LINK_TTL_MS }
+  await $.store.set('linkPending', linkPending)
+  $.ui.invalidate('ui.render')
+  return t('linkStarted', { code: linkCode() })
+}
+
+async function cancelLink($: EngineInterface) {
+  linkPending = undefined
+  await $.store.delete('linkPending')
+  $.ui.invalidate('ui.render')
+}
+
+// On the device that has the identity: seal everything for the code's holder and post it to the code's topic.
+async function sendLink($: EngineInterface, text: string): Promise<string> {
+  const match = LINK_RE.exec(text)
+  if (!match) return t('linkBadCode')
+  let secret: Uint8Array
+  try { secret = unb64(match[1]!) } catch { return t('linkBadCode') }
+  if (secret.length !== 32) return t('linkBadCode')
+  if (linkPending && match[1] === linkPending.secret) return t('linkOwnCode')
+  if (!(await confirm($, t('linkConfirm'), t('linkConfirmYes')))) return t('linkCancelled')
+
+  const snapshot = {
+    v: 1, secretKey: await $.store.get('secretKey'), kemSeed: await $.store.get('kemSeed'), lastSeen: await $.store.get('lastSeen'),
+    lang, ...currentState(), inbox: [...inbox],
+  }
+  let json = JSON.stringify(snapshot)
+  while (json.length > SNAPSHOT_MAX_CHARS && snapshot.inbox.length) {
+    snapshot.inbox.splice(0, Math.ceil(snapshot.inbox.length / 4))
+    json = JSON.stringify(snapshot)
+  }
+  const bytes = encode(json)
+  const key = linkKey(secret)
+  const set = newId()
+  const size = 2200
+  const n = Math.ceil(bytes.length / size)
+  for (let i = 0; i < n; i++) {
+    const nonce = nacl.randomBytes(24)
+    const box = nacl.secretbox(bytes.slice(i * size, (i + 1) * size), nonce, key)
+    const body = JSON.stringify({ v: 1, set, i, n, nonce: b64(nonce), box: b64(box) })
+    try {
+      const res = await $.http.fetch(linkTopic(secret), { method: 'POST', body })
+      if (!res.ok) return t('linkFailed', { error: String(res.status) })
+    } catch (err) {
+      return t('linkFailed', { error: String(err) })
+    }
+  }
+  linked = true
+  await $.store.set('linked', true)
+  $.ui.invalidate('ui.render')
+  return t('linkSent')
+}
+
+async function pollLink($: EngineInterface) {
+  if (!linkPending) return
+  const now = await $.clock.now()
+  if (now > linkPending.until) {
+    await cancelLink($)
+    $.ui.toast(t('linkExpired'))
+    return
+  }
+  const secret = unb64(linkPending.secret)
+  let res
+  try { res = await $.http.fetch(linkTopic(secret) + '/json?poll=1&since=all') } catch { return }
+  if (!res.ok) return
+  const key = linkKey(secret)
+  const sets = new Map<string, Uint8Array[]>()
+  for (const line of res.text.split('\n')) {
+    let frame: { set?: unknown; i?: unknown; n?: unknown; nonce?: unknown; box?: unknown }
+    try { frame = JSON.parse(JSON.parse(line).message) } catch { continue }
+    const { set, i, n, nonce, box } = frame
+    if (typeof set !== 'string' || typeof i !== 'number' || typeof n !== 'number' || typeof nonce !== 'string' || typeof box !== 'string') continue
+    if (n < 1 || n > 200 || i < 0 || i >= n) continue
+    let plain: Uint8Array | null = null
+    try { plain = nacl.secretbox.open(unb64(box), unb64(nonce), key) } catch { plain = null }
+    if (!plain) continue
+    const got = sets.get(set) ?? new Array<Uint8Array>(n)
+    got[i] = plain
+    sets.set(set, got)
+    if (got.filter(Boolean).length === n) {
+      let snapshot: unknown
+      try { snapshot = JSON.parse(new TextDecoder().decode(joinBytes(...got))) } catch { continue }
+      if (await applySnapshot($, snapshot)) return
+    }
+  }
+}
+
+async function applySnapshot($: EngineInterface, value: unknown): Promise<boolean> {
+  const snap = value as Partial<SyncState> & { v?: number; secretKey?: unknown; kemSeed?: unknown; lastSeen?: unknown; lang?: unknown; inbox?: unknown }
+  if (!snap || snap.v !== 1 || typeof snap.secretKey !== 'string' || typeof snap.kemSeed !== 'string') return false
+  try { nacl.box.keyPair.fromSecretKey(unb64(snap.secretKey)) } catch { return false }
+
+  await $.store.set('secretKey', snap.secretKey)
+  await $.store.set('kemSeed', snap.kemSeed)
+  sharedKeys.clear()
+  hybridKeys.clear()
+  topics.clear()
+  await loadIdentity($)
+
+  const now = await $.clock.now()
+  const msgs = asArray<unknown>(snap.inbox).map(cleanMsg).filter((m): m is Msg => !!m)
+  for (const m of msgs) shown.add(m.key)
+  await $.store.set('contacts', asArray<unknown>(snap.contacts).map(cleanContact).filter(Boolean))
+  await $.store.set('groups', asArray<unknown>(snap.groups).map(cleanGroup).filter(Boolean))
+  await $.store.set('inbox', msgs)
+  await $.store.set('blocked', idList(snap.blocked))
+  await $.store.set('gone', numberMap(snap.gone))
+  await $.store.set('readAt', numberMap(snap.readAt))
+  await $.store.set('muted', asArray<unknown>(snap.muted).filter((c): c is string => typeof c === 'string' && CONV_RE.test(c)))
+  const p = cleanProfile(snap.profile)
+  await $.store.set('profile', p)
+  await $.store.set('profileSent', JSON.stringify(p))
+  if (snap.privacy && typeof snap.privacy === 'object') await $.store.set('privacy', snap.privacy)
+  await $.store.set('stateAt', { blocked: 0, profile: 0, muted: 0, privacy: 0, ...numberMap(snap.at) })
+  if (isLang(snap.lang)) await $.store.set('lang', snap.lang)
+  if (typeof snap.lastSeen === 'string') await $.store.set('lastSeen', snap.lastSeen)
+  else await $.store.delete('lastSeen')
+  await $.store.set('primary', false)
+  await $.store.set('linked', true)
+  await $.store.set('activeAt', now)
+  await $.store.delete('linkPending')
+  linkPending = undefined
+  primary = false
+  linked = true
+  // The stream listened on the old identity's topic; the loop opens it again on the new one.
+  currentStream?.return?.()
+  streamLive = false
+  await refresh($, true)
+  $.ui.toast(t('linkDone'))
+  return true
+}
+
 const isOnScreen = (conv: string) => threadOpen && selected === conv
 
 // conv: the chat it is about, so a muted chat stays quiet.
@@ -422,11 +860,13 @@ async function addNotice($: EngineInterface, key: string, sys: Sys) {
 }
 
 async function saveGroup($: EngineInterface, group: Group) {
-  groups = await mutate<Group>($, 'groups', current => [...current.filter(g => g.id !== group.id), group])
+  const changed = await $.clock.now()
+  groups = await mutate<Group>($, 'groups', current => [...current.filter(g => g.id !== group.id), { ...group, changed }])
 }
 
 async function dropGroup($: EngineInterface, id: string) {
   groups = await mutate<Group>($, 'groups', current => current.filter(g => g.id !== id))
+  await markGone($, id)
   if (selected === groupConv(id)) selected = ''
 }
 
@@ -442,6 +882,11 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
   if (blocked.includes(env.from)) return
   const opened = unseal(env)
   if (!opened) return
+  // Sealed with our own key: only another device of ours can have written it.
+  if (env.from === me) {
+    if (opened.p.t === 'self') await receiveSelf($, opened.p)
+    return
+  }
   const { p, hybrid } = opened
   const c = contactOf(env.from)
   // Once the quantum-resistant key exists, classic-sealed content from that person is refused.
@@ -480,10 +925,13 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
       if (c?.state !== 'friend') return
       if (me < env.from) {
         // The side with the smaller ID always encapsulates, so two handshakes started at once still agree on one secret.
+        // Of our devices only the primary does, and its key reaches the others with the next state.
+        if (!primary) return
         let enc: { cipherText: Uint8Array; sharedSecret: Uint8Array }
         try { enc = ml_kem768.encapsulate(unb64(String(p.kem))) } catch { return }
         await saveContact($, { ...c, pq: b64(enc.sharedSecret), pqPrev: c.pq })
         await post($, env.from, { t: 'pq', id: newId(), ct: b64(enc.cipherText) })
+        void syncState($).catch(() => {})
       } else if (!c.pq) {
         await sendKem($, env.from)
       }
@@ -535,6 +983,8 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
       return
     case 'delete':
       await patchMessage($, String(p.ref), env.from, { text: '', deleted: true })
+      return
+    case 'self':
       return
   }
 
@@ -593,6 +1043,12 @@ async function refresh($: EngineInterface, quiet = false) {
     notifications: savedPrivacy?.notifications !== false,
   }
   muted = asArray<string>(await $.store.get('muted'))
+  primary = (await $.store.get('primary')) !== false
+  linked = (await $.store.get('linked')) === true
+  gone = numberMap(await $.store.get('gone'))
+  stateAt = { blocked: 0, profile: 0, muted: 0, privacy: 0, ...numberMap(await $.store.get('stateAt')) }
+  const pending = (await $.store.get('linkPending')) as typeof linkPending
+  linkPending = pending && typeof pending.secret === 'string' && typeof pending.until === 'number' ? pending : undefined
   typing = privacy.typing ? asArray<Typing>(await $.store.get('typing')) : []
   pollerAt = ((await $.store.get('poller')) as { at?: number } | undefined)?.at ?? 0
   if (selected && !conversations().some(c => c.id === selected)) selected = ''
@@ -704,7 +1160,9 @@ async function runStream($: EngineInterface) {
       const url = topicUrl(me) + '/json?since=' + encodeURIComponent(since)
       let buffer = ''
       streamLive = false
-      for await (const piece of $.process.spawn({ argv: ['curl', '-sSN', '--max-time', String(STREAM_MAX_S), url] })) {
+      const proc = $.process.spawn({ argv: ['curl', '-sSN', '--max-time', String(STREAM_MAX_S), url] })
+      currentStream = proc as unknown as { return?: () => unknown }
+      for await (const piece of proc) {
         if (!('text' in piece) || piece.stream !== 'stdout') continue
         buffer += piece.text
         const lines = buffer.split('\n')
@@ -751,6 +1209,13 @@ async function tick($: EngineInterface) {
         await poll($)
         await refresh($)
       }
+      await pollLink($)
+      if (linked) {
+        const last = Number(await $.store.get('activeAt')) || 0
+        if (now - last > CATCHUP_GAP_MS) await postSelf($, { kind: 'want', since: Math.max(0, last - 60_000) })
+      }
+      await $.store.set('activeAt', now)
+      await retryUnconfirmed($)
     })
   } catch {
     // tries again on the next tick
@@ -853,7 +1318,8 @@ async function sendText($: EngineInterface, conv: string, text: string): Promise
   const group = groups.find(g => groupConv(g.id) === conv)
   shown.add(id)
   typingSentAt.delete(conv)
-  await addMessages($, [{ key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true, state: 'sending' }])
+  const msg: Msg = { key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true, dev: deviceId }
+  await addMessages($, [{ ...msg, state: 'sending' }])
   newerSkip = 0
   $.ui.invalidate('ui.render')
   scrollToRest($)
@@ -866,6 +1332,7 @@ async function sendText($: EngineInterface, conv: string, text: string): Promise
   }
   await patchMessage($, id, me, { state: undefined })
   $.ui.invalidate('ui.render')
+  if (linked) void postSelf($, { kind: 'sent', msg }).catch(() => {})
   return result.missed.length ? { ok: false, text: partialText(result.missed), sent: true } : { ok: true, text: t('sent'), sent: true }
 }
 
@@ -875,6 +1342,7 @@ async function editMessage($: EngineInterface, msg: Msg, text: string): Promise<
   const result = await fanOut($, msg.conv, () => ({ t: 'edit', id: newId(), ref: msg.key, text }))
   if (result.error) return { ok: false, text: result.error }
   await patchMessage($, msg.key, me, { text, edited: true })
+  if (linked) void postSelf($, { kind: 'patch', ref: msg.key, patch: { text, edited: true } }).catch(() => {})
   $.ui.invalidate('ui.render')
   return result.missed.length ? { ok: false, text: partialText(result.missed) } : { ok: true, text: t('editedOk') }
 }
@@ -883,6 +1351,7 @@ async function deleteMessage($: EngineInterface, msg: Msg): Promise<Outcome> {
   const result = await fanOut($, msg.conv, () => ({ t: 'delete', id: newId(), ref: msg.key }))
   if (result.error) return { ok: false, text: result.error }
   await patchMessage($, msg.key, me, { text: '', deleted: true })
+  if (linked) void postSelf($, { kind: 'patch', ref: msg.key, patch: { text: '', deleted: true } }).catch(() => {})
   $.ui.invalidate('ui.render')
   return result.missed.length ? { ok: false, text: partialText(result.missed) } : { ok: true, text: t('deletedOk') }
 }
@@ -908,6 +1377,7 @@ async function addContact($: EngineInterface, id: string, nickname = ''): Promis
 
   await saveContact($, { id, state: 'outgoing', profile: c?.profile ?? { username: '', displayName: '' }, nickname: nick, at: await $.clock.now() })
   const err = await post($, id, { t: 'request', id: newId(), profile })
+  void syncState($).catch(() => {})
   $.ui.invalidate('ui.render')
   return err ? t('requestFailed', { error: errorText(err) }) : t('requestSent')
 }
@@ -919,6 +1389,7 @@ async function acceptContact($: EngineInterface, id: string, nickname?: string):
   const err = await post($, id, { t: 'accept', id: newId(), profile })
   if (!err) await sendKem($, id)
   await addMessages($, [systemMsg(newId(), convOf(id), { key: 'sysFriends' }, await $.clock.now())])
+  void syncState($).catch(() => {})
   selected = convOf(id)
   view = 'chats'
   threadOpen = true
@@ -929,18 +1400,23 @@ async function acceptContact($: EngineInterface, id: string, nickname?: string):
 async function unfriend($: EngineInterface, id: string) {
   if (isFriend(id)) await post($, id, { t: 'unfriend', id: newId() })
   await dropContact($, id)
+  void syncState($).catch(() => {})
   $.ui.invalidate('ui.render')
 }
 
 // Blocking is silent: the other side is not told; their messages and requests are dropped here.
 async function block($: EngineInterface, id: string) {
   blocked = await mutate<string>($, 'blocked', cur => [...cur.filter(b => b !== id), id])
+  await touchState($, 'blocked')
   await dropContact($, id)
+  void syncState($).catch(() => {})
   $.ui.invalidate('ui.render')
 }
 
 async function unblock($: EngineInterface, id: string) {
   blocked = await mutate<string>($, 'blocked', cur => cur.filter(b => b !== id))
+  await touchState($, 'blocked')
+  void syncState($).catch(() => {})
   $.ui.invalidate('ui.render')
 }
 
@@ -948,13 +1424,16 @@ async function setNickname($: EngineInterface, id: string, nickname: string) {
   const c = contactOf(id)
   if (!c) return
   await saveContact($, { ...c, nickname: cleanText(nickname, 40) || undefined })
+  void syncState($).catch(() => {})
   $.ui.invalidate('ui.render')
 }
 
 async function setProfile($: EngineInterface, patch: Partial<Profile>): Promise<string> {
   profile = cleanProfile({ ...profile, ...patch })
   await $.store.set('profile', profile)
+  await touchState($, 'profile')
   await broadcastProfile($)
+  void syncState($).catch(() => {})
   $.ui.invalidate('ui.render')
   return t('profileSaved', { name: myPublicName(), username: profile.username ? ' (@' + profile.username + ')' : '' })
 }
@@ -1003,6 +1482,7 @@ async function createGroup($: EngineInterface, rawTitle: string, memberIds: stri
   view = 'chats'
   threadOpen = true
   groupPick.clear()
+  void syncState($).catch(() => {})
   $.ui.invalidate('ui.render')
   return t('groupCreated', { title }) + (failed.length ? t('invitesFailed', { names: failed.join(', ') }) : '')
 }
@@ -1013,6 +1493,7 @@ async function addToGroup($: EngineInterface, group: Group, id: string): Promise
   await saveGroup($, updated)
   const failed = await sendInvites($, updated)
   await addMessages($, [systemMsg(newId(), groupConv(group.id), { key: 'sysMemberAdded', vars: { name: nameOf(id) } }, await $.clock.now())])
+  void syncState($).catch(() => {})
   $.ui.invalidate('ui.render')
   return failed.length ? t('updateFailed', { names: failed.join(', ') }) : t('memberAdded', { name: nameOf(id) })
 }
@@ -1022,6 +1503,7 @@ async function leaveGroup($: EngineInterface, group: Group) {
     if (m.id !== me) await post($, m.id, { t: 'leave', id: newId(), g: group.id, name: myPublicName() })
   }
   await dropGroup($, group.id)
+  void syncState($).catch(() => {})
   $.ui.invalidate('ui.render')
 }
 
@@ -1187,6 +1669,7 @@ async function registerCommands($: EngineInterface) {
   await $.command.register({ name: 'buddy-send', description: t('cmdSend'), argumentHint: t('cmdSendHint') })
   await $.command.register({ name: 'buddy-group', description: t('cmdGroup'), argumentHint: t('cmdGroupHint') })
   await $.command.register({ name: 'buddy-lang', description: t('cmdLang'), argumentHint: t('cmdLangHint') })
+  await $.command.register({ name: 'buddy-link', description: t('cmdLink'), argumentHint: t('cmdLinkHint') })
 }
 
 export const register: Register = on => {
@@ -1199,10 +1682,13 @@ export const register: Register = on => {
     filter = ''
     await migrate($)
     await loadIdentity($)
+    const savedDevice = await $.store.get('deviceId')
+    deviceId = typeof savedDevice === 'string' ? savedDevice : newId()
+    if (savedDevice !== deviceId) await $.store.set('deviceId', deviceId)
     await refresh($, true)
     void broadcastProfile($).catch(() => {})
     // Handshake with friends who have no quantum-resistant key yet, such as those updated from 0.4.
-    void (async () => { for (const f of friends()) if (!f.pq) await sendKem($, f.id) })().catch(() => {})
+    if (primary) void (async () => { for (const f of friends()) if (!f.pq) await sendKem($, f.id) })().catch(() => {})
 
     $.clock.every(POLL_MS, () => tick($))
     // A pane is the session's: one left open in the last session opens again here, until the person closes it.
@@ -1265,6 +1751,10 @@ export const register: Register = on => {
     const next = e.args.trim().toLowerCase()
     if (!isLang(next)) return { text: t('usageLang') }
     return { text: await setLang($, next) }
+  })
+
+  on('command.run', { command: 'buddy-link' }, async ($, e) => {
+    return { text: e.args.trim() ? await sendLink($, e.args) : await startLink($) }
   })
 
   on('command.run', { command: 'buddy-list' }, async () => {
@@ -1508,6 +1998,34 @@ export const register: Register = on => {
       </Box>
     )
 
+    // One identity on several computers: the new one shows a code, the one that has the identity takes it.
+    const pendingCode = linkPending && linkPending.until > now ? linkCode() : ''
+    const devicesCard = card('devices-card', <Text weight="semibold">{t('devicesTitle')}</Text>,
+      <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
+        <Text dimColor size="footnote">{linked ? t(primary ? 'devicesLinkedPrimary' : 'devicesLinked') : t('devicesHint')}</Text>
+        {pendingCode
+          ? (
+            <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
+              <Text size="caption">{t('linkShowCode')}</Text>
+              <Box flexShrink={1}><Text mono size="caption" wrap="truncate-middle">{pendingCode}</Text></Box>
+              <Box flexDirection="row" columnGap={graphic ? 1 : 2}>
+                <Button key="link-copy" label={t('linkCopy')} plain={graphic ? undefined : true} variant={graphic ? 'primary' : undefined}
+                  onPress={press => copy(pendingCode, press.surface, t('linkCopied'))} />
+                <Button key="link-cancel" label={t('linkCancel')} plain dimColor onPress={() => cancelLink($)} />
+              </Box>
+            </Box>
+          )
+          : <Button key="link-start" label={t('linkStart')} plain={graphic ? undefined : true} onPress={async () => toast(await startLink($))} />}
+        {Input && (
+          <Input key={'link-code' + (linkSeq ? '-' + linkSeq : '')} placeholder={t('linkPaste')} value="" submitLabel={t('linkSend')}
+            onSubmit={async (value: string) => {
+              toast(await sendLink($, value))
+              linkSeq++
+              redraw()
+            }} />
+        )}
+      </Box>)
+
     const stepTitle = (n: number, title: string, done: boolean) => (
       <Box flexDirection="row" columnGap={1} alignItems="center">
         <Text weight="bold" color={done ? 'success' : 'claude'}>{done ? '✓' : n + '.'}</Text>
@@ -1672,6 +2190,7 @@ export const register: Register = on => {
                 actions({ key: 'unblock-' + id, label: t('unblock'), onPress: () => unblock($, id) })))}
             </Box>
           )}
+          {devicesCard}
           {footer}
         </Box>
       )

@@ -14,6 +14,8 @@ buddy-chat is a Claude Code [mod](https://code.claude.com/docs/en/plugins/mods/o
 - Edit and delete your own messages for everyone, and copy any message
 - Message states: sending ◷, sent ✓, delivered ✓✓ and read (blue ✓✓)
 - A typing indicator in direct chats
+- One account on several computers: link a device, and messages and settings sync between your devices
+- Messages that are not confirmed go out again for up to 7 days, so a friend who is away for more than 12 hours still gets them
 - Privacy switches for read receipts and the typing indicator. With read receipts off, you send none and see none.
 - Remove a friend (they are told) or block someone (they are not told)
 - Toasts and operating system notifications for new messages and requests, with a switch for all of them and a mute button for each chat. A chat that is open on screen does not notify.
@@ -109,6 +111,7 @@ The pane is the same on every surface. Each app draws it in its own style.
 | `/buddy-send <person or group> <message>` | Send a message |
 | `/buddy-group <name> <person1> [person2 ...]` | Create a group |
 | `/buddy-lang <en or tr>` | Set the language |
+| `/buddy-link [code]` | Without a code: show a code on a new device. With a code: link that device to your account |
 
 You can name a person by their nickname, their display name or their `@username`.
 
@@ -132,6 +135,8 @@ English is the default. To use Turkish, run `/buddy-lang tr`, or select **Türk�
 - **Groups.** Each group message is sealed for each member and sent to each member. Members who are your friends get the quantum-resistant key. Other members get X25519. Only the person who created the group can change its members.
 - **Edit and delete.** Your friend's plugin applies the change. It cannot undo a screenshot or a changed client.
 - **Receipts and typing.** Delivered and read receipts and the typing signal are sealed messages too. A receipt counts only when it comes from a person the message went to.
+- **Resend.** If a friend whose version sends receipts did not confirm a message, buddy-chat sends it again every 11 hours, for up to 7 days. The friend's plugin drops a copy it already has.
+- **Linked devices.** On the new device, select **People → Devices → This is the new device** (or run `/buddy-link`). Paste the code on the device that has your account. That device seals your keys, contacts, groups, settings and recent messages with a key from the code and posts them to a topic that only the code names. The new device opens them and uses the same identity. After that, each device seals a copy of what changes (sent messages, edits, contacts, settings) for itself and posts it to your own topic. A device that was away for more than 5 minutes asks the others for what it missed. The device that made the identity runs the ML-KEM handshakes, because two devices would agree on two different keys.
 
 ## Security limits
 
@@ -139,11 +144,12 @@ English is the default. To use Turkish, run `/buddy-lang tr`, or select **Türk�
 - **Metadata is visible.** ntfy.sh sees which topics get messages, when, from which IP address, and how large the messages are.
 - **Third-party code.** Cure53 audited TweetNaCl.js. noble-post-quantum has no independent audit; only its author audited it. This is why buddy-chat joins the two in a hybrid key.
 - **Not audited.** buddy-chat itself has had no security audit.
+- **The link code is your account.** Anyone who has the code in its 10 minutes, and reads the relay within 12 hours, can open the snapshot. Send it only to yourself. Linked devices share one identity, so you cannot remove one device without making a new identity.
 
 ## Limits
 
 - ntfy.sh gives each IP address 60 requests, then adds one request every 5 seconds. If buddy-chat gets HTTP 429, it waits one minute.
-- ntfy.sh keeps messages for 12 hours. A message to someone who opens no session in that time is lost.
+- ntfy.sh keeps messages for 12 hours. buddy-chat sends unconfirmed messages again for up to 7 days, but only to friends on 0.10 or later. A message to an older version that opens no session in 12 hours is lost.
 - One message holds about 2,500 characters.
 - Each group message, edit and delete uses one request for each member.
 - Receipts and typing signals also use requests. buddy-chat sends one receipt for each batch of messages and one typing signal every 5 seconds at most. Groups have no typing indicator.
