@@ -1,6 +1,6 @@
 {
   "name": "buddy-chat",
-  "version": "0.19.10",
+  "version": "0.19.11",
   "description": "End-to-end encrypted, quantum-resistant chat between Claude Code users: direct messages and groups, relayed through ntfy.sh with no server of its own",
   "author": { "name": "MrMirhan", "url": "https://github.com/MrMirhan" },
   "homepage": "https://github.com/MrMirhan/claude-buddy-chat",

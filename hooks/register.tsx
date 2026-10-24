@@ -2528,14 +2528,13 @@ export const register: Register = on => {
         ? <Text size="heading" weight="semibold" color={color}>{title}{count !== undefined ? <Text dimColor> {count}</Text> : ''}</Text>
         : <Text weight="bold" color={color ?? 'claude'}>{title}{count !== undefined ? ' (' + count + ')' : ''}</Text>
 
-    const statusView =
-      status?.state === 'ok' && now - pollerAt < POLLER_STALE_MS * 2
-        ? <Text color="success" size="caption">{t('statusOk')}</Text>
-        : status?.state === 'limited'
-          ? <Text color="warning" size="caption">{t('statusLimited')}</Text>
-          : status?.state === 'error'
-            ? <Text color="error" size="caption">{t('statusError')}</Text>
-            : <Text dimColor size="caption">{t('statusWaiting')}</Text>
+    const [statusColor, statusLabel] =
+      status?.state === 'ok' && now - pollerAt < POLLER_STALE_MS * 2 ? ['success', t('statusOk')] as const
+        : status?.state === 'limited' ? ['warning', t('statusLimited')] as const
+          : status?.state === 'error' ? ['error', t('statusError')] as const
+            : [undefined, t('statusWaiting')] as const
+    // Desktop shows the dot alone; the words would wrap the header on a narrow pane.
+    const statusView = <Text color={statusColor} dimColor={!statusColor} size="caption">{graphic ? '●' : statusLabel}</Text>
 
     const tab = (key: string, label: string, hotkey: string, active: boolean, onPress: () => void, badge = 0) =>
       graphic
@@ -3432,7 +3431,7 @@ export const register: Register = on => {
                 <Text size="heading" weight="semibold" wrap="truncate-end">{(current.isGroup ? '# ' : '') + current.title}</Text>
                 {isTyping(current.id)
                   ? <Text color={ACCENT} size="caption" italic>{t('typingNow')}</Text>
-                  : <Text dimColor size="caption" wrap="truncate-end">{'🔒 ' + securityLine}</Text>}
+                  : <Text dimColor size="caption" wrap="truncate-end">{'🔒 ' + (group ? group.members.map(m => nameOf(m.id, m.name)).join(', ') : peer ? subtitle(peer) : '')}</Text>}
               </Box>
               {muteButton}
               {statusView}
