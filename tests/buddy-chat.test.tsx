@@ -1316,3 +1316,16 @@ test('no toast while the pane is shown; one when it is not', async ($, on) => {
   await w.clock.advance(8000)
   expect(w.toasts.some(t => t.includes('pane kapalı'))).toBe(true)
 })
+
+test('settings show the plugin version from plugin.json', async ($, on) => {
+  on('fs.read', (_, e) => {
+    if ((e as { path: string }).path.endsWith('/.claude-plugin/plugin.json')) return { value: '{"name":"buddy-chat","version":"9.8.7"}' } as never
+    throw new Error('missing')
+  })
+  setup(on, { ...V4 })
+  await start($)
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-settings' })
+  expect(await shows(ui, { type: 'Text', text: /^buddy-chat 9\.8\.7$/ })).toBeDefined()
+  await ui.unmount()
+})

@@ -202,6 +202,7 @@ let backupDir = ''
 let backupAt = 0
 // No folder dialog could open here, so the card shows a field for a typed path.
 let pickerMissing = false
+let pluginVersion = ''
 let groupSeq = 0
 let pollerAt = 0
 // Terminal: the message j/k marked; its actions take one key (e, x, f). Empty: no mark.
@@ -2142,6 +2143,15 @@ export const register: Register = on => {
       deviceName = ''
     }
     deviceName ||= t('deviceFallback', { id: deviceId.slice(0, 4) })
+    for (const path of [$.plugin.root + '/.claude-plugin/plugin.json', $.plugin.root + '/plugin.json']) {
+      try {
+        const version = (JSON.parse(await $.fs.read(path)) as { version?: unknown }).version
+        if (typeof version === 'string') pluginVersion = version
+        break
+      } catch {
+        // not at this path
+      }
+    }
     await refresh($, true)
     void broadcastProfile($).catch(() => {})
     // Handshake with friends who have no quantum-resistant key yet, such as those updated from 0.4.
@@ -2623,7 +2633,10 @@ export const register: Register = on => {
           {card('language-card', <Text weight="semibold">{t('languageLabel')}</Text>, languagePicker)}
           {devicesCard}
           {recoveryCard}
-          {footer}
+          <Box flexDirection="row" justifyContent="space-between" flexWrap="wrap" columnGap={2}>
+            {footer}
+            {pluginVersion && <Text dimColor size="caption">{'buddy-chat ' + pluginVersion}</Text>}
+          </Box>
         </Box>
       )
     }
