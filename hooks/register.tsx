@@ -2698,7 +2698,7 @@ export const register: Register = on => {
       )
       if (m.mine) {
         return (
-          <Box flexDirection="row" columnGap={1}>
+          <Box flexDirection="row" columnGap={compact ? 0 : 1}>
             {copyButton}
             <Button key={'edit-' + m.key} label="✎" plain dimColor={!marked} hotkey={marked ? 'e' : undefined}
               onPress={() => { editing = m.key; redraw() }} />
@@ -2711,14 +2711,14 @@ export const register: Register = on => {
       }
       if (m.forwarded) {
         return (
-          <Box flexDirection="row" columnGap={1}>
+          <Box flexDirection="row" columnGap={compact ? 0 : 1}>
             {copyButton}
             {!compact && <Text dimColor size="caption">{t('forwarded')}</Text>}
           </Box>
         )
       }
       return (
-        <Box flexDirection="row" columnGap={1}>
+        <Box flexDirection="row" columnGap={compact ? 0 : 1}>
         {copyButton}
         <Button key={'fwd-' + m.key} label={graphic && !compact ? t('forwardButton') : '↗'} plain dimColor={!marked} hotkey={marked ? 'f' : undefined}
           onPress={async () => {
@@ -2769,7 +2769,7 @@ export const register: Register = on => {
       const name = nameOf(m.from, m.name)
 
       if (graphic) {
-        // Desktop: chat bubbles; actions show on hover; in groups other people's messages carry an avatar and a name.
+        // Desktop: chat bubbles with their actions beside the time; in groups other people's messages carry an avatar and a name.
         const showFace = !m.mine && !!group
         return (
           <Box key={'msg-' + m.key} flexDirection="column" alignItems={m.mine ? 'flex-end' : 'flex-start'} marginTop={sameRun ? 'xs' : 'md'}>
@@ -2785,9 +2785,9 @@ export const register: Register = on => {
                 {m.deleted
                   ? <Text italic color={m.mine ? MINE_SOFT : undefined} dimColor={!m.mine}>{t('deletedMsg')}</Text>
                   : <Text wrap="wrap" color={m.mine ? '#ffffff' : undefined}>{m.text}</Text>}
-                {/* The actions share the time's row, so showing them on hover changes no height and nothing moves. */}
+                {/* The actions share the time's row and always show, so nothing moves on hover. */}
                 <Box flexDirection="row" justifyContent="flex-end" alignItems="center" columnGap={1}>
-                  <Box display="none" hover={{ display: 'flex' }} flexDirection="row" flexGrow={1}>{msgActions(m, true)}</Box>
+                  <Box flexDirection="row" flexGrow={1}>{msgActions(m, true)}</Box>
                   <Text size="caption" color={m.mine ? MINE_SOFT : undefined} dimColor={!m.mine}>
                     {(m.edited ? t('editedShort') + ' · ' : '') + clock(m.at)}
                   </Text>
