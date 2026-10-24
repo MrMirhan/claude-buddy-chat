@@ -234,9 +234,9 @@ let restTries = 0
 // message takes more wheel than a short one, as in a scrolled page. avgRows: the rows a message on screen takes.
 let wheelRows = 0
 let avgRows = 3
-const WHEEL_ROWS = 1
-// At most this many messages move per settled burst of the wheel, so the list never leaps.
-const WHEEL_MAX_STEP = 2
+const WHEEL_ROWS = 2
+// At most this many messages move per settled burst of the wheel, so the list never leaps; the rest carries over.
+const WHEEL_MAX_STEP = 4
 const WHEEL_SETTLE_MS = 80
 let wheelTimer: { cancel: () => void } | undefined
 let newestOpen = ''
@@ -2107,6 +2107,17 @@ const scrollToRest = ($: EngineInterface) => {
   void $.ui.scroll({ to: { key: 'chat-top' }, in: PANE, block: 'start' }).catch(() => {})
 }
 
+// Moves the messages by what the wheel summed: WHEEL_MAX_STEP at most, and what is left moves with the next burst.
+function flushWheel($: EngineInterface) {
+  wheelTimer = undefined
+  const steps = Math.trunc(wheelRows / avgRows)
+  if (!steps) return
+  const moved = Math.max(-WHEEL_MAX_STEP, Math.min(WHEEL_MAX_STEP, steps))
+  wheelRows -= moved * avgRows
+  pageBy($, -moved)
+  if (Math.abs(wheelRows) >= avgRows) wheelTimer = $.clock.after(WHEEL_SETTLE_MS, () => flushWheel($))
+}
+
 // Moves the message window: a positive step goes to older messages, a negative one back toward the newest.
 function pageBy($: EngineInterface, step: number) {
   const next = Math.max(0, Math.min(newerSkip + step, hiddenAbove + newerSkip))
@@ -2437,15 +2448,10 @@ export const register: Register = on => {
       if (Math.sign(wheelRows) === Math.sign(rows)) wheelRows += rows
       else wheelRows = rows
       // Ticks that come close together move the messages once, so a fast scroll redraws less often.
-      if (!wheelTimer) {
-        wheelTimer = $.clock.after(WHEEL_SETTLE_MS, () => {
-          wheelTimer = undefined
-          const steps = Math.trunc(wheelRows / avgRows)
-          if (!steps) return
-          wheelRows = 0
-          pageBy($, -Math.max(-WHEEL_MAX_STEP, Math.min(WHEEL_MAX_STEP, steps)))
-        })
-      }
+      // A long flick carries at most three bursts' worth, so the list does not keep running after the hand stops.
+      const cap = avgRows * WHEEL_MAX_STEP * 3
+      wheelRows = Math.max(-cap, Math.min(cap, wheelRows))
+      if (!wheelTimer) wheelTimer = $.clock.after(WHEEL_SETTLE_MS, () => flushWheel($))
     }
     return next({ ...e, offset: restOffset })
   })
