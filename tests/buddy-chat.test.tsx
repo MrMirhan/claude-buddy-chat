@@ -5,7 +5,7 @@ import { ml_kem768 } from '../hooks/vendor/mlkem.js'
 
 type KP = { publicKey: Uint8Array; secretKey: Uint8Array }
 type Post = { url: string; body: string }
-type World = { feed: string[]; linkFeed: string[]; posts: Post[]; gets: number; opens: string[]; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
+type World = { feed: string[]; linkFeed: string[]; statuses: string[]; posts: Post[]; gets: number; opens: string[]; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
 
 const enc = (s: string) => new TextEncoder().encode(s)
 const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
@@ -37,7 +37,7 @@ const sent = (w: World, kp: KP) => to(w, kp).filter(p => !['kem', 'pq', 'receipt
 
 // spawn stands in for curl; without one the stream cannot start and the poller carries the test.
 function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?: (e: { argv: string[] }) => AsyncGenerator<object>): World {
-  const w: World = { feed: [], linkFeed: [], posts: [], gets: 0, opens: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
+  const w: World = { feed: [], linkFeed: [], statuses: [], posts: [], gets: 0, opens: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
   mock.store(on, store)
   w.clock = mock.clock(on, { now: 1_800_000_000_000 })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -46,6 +46,7 @@ function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?:
   on('tool.register', (_, e) => ({ value: { tool: 'mcp__buddy-chat__' + e.name } }))
   on('ui.open', (_, e) => { w.opens.push((e as { id: string }).id); return { value: { isPlaced: true } } as never })
   on('ui.copy', () => ({ value: { isCopied: true } }))
+  on('ui.status', (_, e) => { w.statuses.push(JSON.stringify(e)); return { value: undefined } as never })
   on('process.spawn', async function* (_: unknown, e: { argv: string[] }) {
     if (!spawn) throw new Error('no curl')
     yield* spawn(e)
@@ -954,6 +955,11 @@ test('link, old device: the code gets a sealed snapshot of the identity, contact
   expect(snap.inbox.map((m: { text: string }) => m.text)).toEqual(['merhaba'])
   // Nothing readable goes to the relay.
   expect(w.posts.some(p => p.body.includes('merhaba'))).toBe(false)
+  expect(w.statuses.at(-1)).toContain('bekleniyor')
+
+  w.feed.push(envelope(mine, idOf(mine), { t: 'self', id: 'l1', dev: 'new-device', kind: 'linked' }))
+  await w.clock.advance(8000)
+  expect(w.toasts.some(t => t.includes('Yeni cihazın bağlandı'))).toBe(true)
 })
 
 test('link, new device: the snapshot replaces the identity and keeps the history quiet', async ($, on) => {
@@ -963,6 +969,7 @@ test('link, new device: the snapshot replaces the identity and keeps the history
   const before = await start($)
   const reply = await run($, 'buddy-link')
   const code = /buddylink-([A-Za-z0-9_-]{43})/.exec(reply.text ?? '')![1]!
+  expect(w.statuses.at(-1)).toContain('bekleniyor')
   const secret = unb64(code)
   const snap = {
     v: 1, secretKey: b64(old.secretKey), kemSeed: b64(nacl.randomBytes(64)), lastSeen: 'ev7', lang: 'tr',
@@ -984,6 +991,10 @@ test('link, new device: the snapshot replaces the identity and keeps the history
   expect(await list($)).toContain('Ahmet')
   expect(w.toasts.some(t => t.includes('eski mesaj'))).toBe(false)
   expect(w.toasts.some(t => t.includes('hesabını kullanıyor'))).toBe(true)
+  expect(w.statuses.some(x => x.includes('Bağlandı'))).toBe(true)
+  // The old device hears that the new one took the account.
+  const told = w.posts.filter(p => p.url === topicOf(idOf(old))).map(p => opened(p, old)).filter(p => p?.t === 'self')
+  expect(told.some(p => p.kind === 'linked')).toBe(true)
 })
 
 test('linked devices: sent copies, missed-message requests and state from the primary', async ($, on) => {

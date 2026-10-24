@@ -115,7 +115,7 @@ type SelfPayload = {
   t: 'self'
   id: string
   dev: string
-  kind: 'part' | 'sent' | 'patch' | 'state' | 'want' | 'have'
+  kind: 'part' | 'sent' | 'patch' | 'state' | 'want' | 'have' | 'linked'
   set?: string; i?: number; n?: number; data?: string
   msg?: Msg; msgs?: Msg[]
   ref?: string; patch?: { text?: string; edited?: boolean; deleted?: boolean }
@@ -164,6 +164,10 @@ let stateAt: SyncState['at'] = { blocked: 0, profile: 0, muted: 0, privacy: 0 }
 let linkPending: { secret: string; until: number } | undefined
 const parts = new Map<string, string[]>()
 let currentStream: { return?: () => unknown } | undefined
+// Linking progress, shown in every session's status line and Devices card; linkTimer polls fast while a code waits.
+let linkStatus = ''
+let linkTimer: { cancel: () => void } | undefined
+const LINK_POLL_MS = 2000
 let typing: Typing[] = []
 // Receipts wait here until the batch they arrived in is handled, then go out one post per person and kind.
 const receiptQueue = new Map<string, Set<string>>()
@@ -602,6 +606,10 @@ async function receiveSelf($: EngineInterface, p: SelfPayload) {
       await postSelf($, { kind: 'have', msgs, state: currentState(), primary })
       return
     }
+    case 'linked':
+      $.ui.toast(t('linkConfirmed'))
+      await setLinkStatus($, t('linkStatusConfirmed'), 15_000)
+      return
     case 'have': {
       const msgs = asArray<unknown>(p.msgs).map(cleanMsg).filter((m): m is Msg => !!m)
       // What another device kept while this one was away is history here, not news.
@@ -711,19 +719,35 @@ const linkKey = (secret: Uint8Array) => nacl.hash(joinBytes(secret, encode('budd
 const linkTopic = (secret: Uint8Array) => RELAY + '/buddy-chat-link-' + hex(nacl.hash(joinBytes(secret, encode('buddy-chat link topic')))).slice(0, 32)
 const linkCode = () => (linkPending ? 'buddylink-' + linkPending.secret : '')
 
+async function setLinkStatus($: EngineInterface, text: string, clearAfterMs = 0) {
+  linkStatus = text
+  await $.store.set('linkStatus', text)
+  $.ui.status(text ? 'buddy-chat: ' + text : undefined)
+  $.ui.invalidate('ui.render')
+  if (clearAfterMs) $.clock.after(clearAfterMs, () => { if (linkStatus === text) void setLinkStatus($, '').catch(() => {}) })
+}
+
+function stopLinkPolling() {
+  linkTimer?.cancel()
+  linkTimer = undefined
+}
+
 // On the new device: wait for a snapshot. Its own identity is replaced when the snapshot arrives.
 async function startLink($: EngineInterface): Promise<string> {
   if (contacts.length && !(await confirm($, t('linkReplaceConfirm'), t('linkReplaceYes')))) return t('linkCancelled')
   linkPending = { secret: b64(nacl.randomBytes(32)), until: (await $.clock.now()) + LINK_TTL_MS }
   await $.store.set('linkPending', linkPending)
-  $.ui.invalidate('ui.render')
+  await setLinkStatus($, t('linkStatusWaiting', { min: Math.ceil(LINK_TTL_MS / 60_000) }))
+  stopLinkPolling()
+  linkTimer = $.clock.every(LINK_POLL_MS, () => { void serial(() => pollLink($)).catch(() => {}) })
   return t('linkStarted', { code: linkCode() })
 }
 
 async function cancelLink($: EngineInterface) {
   linkPending = undefined
+  stopLinkPolling()
   await $.store.delete('linkPending')
-  $.ui.invalidate('ui.render')
+  await setLinkStatus($, '')
 }
 
 // On the device that has the identity: seal everything for the code's holder and post it to the code's topic.
@@ -751,19 +775,25 @@ async function sendLink($: EngineInterface, text: string): Promise<string> {
   const size = 2200
   const n = Math.ceil(bytes.length / size)
   for (let i = 0; i < n; i++) {
+    await setLinkStatus($, t('linkStatusSending', { got: i + 1, n }))
     const nonce = nacl.randomBytes(24)
     const box = nacl.secretbox(bytes.slice(i * size, (i + 1) * size), nonce, key)
     const body = JSON.stringify({ v: 1, set, i, n, nonce: b64(nonce), box: b64(box) })
     try {
       const res = await $.http.fetch(linkTopic(secret), { method: 'POST', body })
-      if (!res.ok) return t('linkFailed', { error: String(res.status) })
+      if (!res.ok) {
+        await setLinkStatus($, '')
+        return t('linkFailed', { error: String(res.status) })
+      }
     } catch (err) {
+      await setLinkStatus($, '')
       return t('linkFailed', { error: String(err) })
     }
   }
   linked = true
   await $.store.set('linked', true)
-  $.ui.invalidate('ui.render')
+  // The new device says so once it uses the account; until then this waits, and gives up after the code's lifetime.
+  await setLinkStatus($, t('linkStatusWaitingNew'), LINK_TTL_MS)
   return t('linkSent')
 }
 
@@ -775,12 +805,14 @@ async function pollLink($: EngineInterface) {
     $.ui.toast(t('linkExpired'))
     return
   }
+  if (!linkTimer) linkTimer = $.clock.every(LINK_POLL_MS, () => { void serial(() => pollLink($)).catch(() => {}) })
   const secret = unb64(linkPending.secret)
   let res
   try { res = await $.http.fetch(linkTopic(secret) + '/json?poll=1&since=all') } catch { return }
   if (!res.ok) return
   const key = linkKey(secret)
   const sets = new Map<string, Uint8Array[]>()
+  let best = { got: 0, n: 0 }
   for (const line of res.text.split('\n')) {
     let frame: { set?: unknown; i?: unknown; n?: unknown; nonce?: unknown; box?: unknown }
     try { frame = JSON.parse(JSON.parse(line).message) } catch { continue }
@@ -793,12 +825,23 @@ async function pollLink($: EngineInterface) {
     const got = sets.get(set) ?? new Array<Uint8Array>(n)
     got[i] = plain
     sets.set(set, got)
-    if (got.filter(Boolean).length === n) {
+    const have = got.filter(Boolean).length
+    if (have > best.got) best = { got: have, n }
+    if (have === n) {
       let snapshot: unknown
       try { snapshot = JSON.parse(new TextDecoder().decode(joinBytes(...got))) } catch { continue }
-      if (await applySnapshot($, snapshot)) return
+      await setLinkStatus($, t('linkStatusApplying'))
+      if (await applySnapshot($, snapshot)) {
+        stopLinkPolling()
+        await setLinkStatus($, t('linkStatusDone'), 15_000)
+        await postSelf($, { kind: 'linked' })
+        return
+      }
     }
   }
+  await setLinkStatus($, best.n
+    ? t('linkStatusReceiving', best)
+    : t('linkStatusWaiting', { min: Math.max(1, Math.ceil((linkPending.until - now) / 60_000)) }))
 }
 
 async function applySnapshot($: EngineInterface, value: unknown): Promise<boolean> {
@@ -1047,6 +1090,12 @@ async function refresh($: EngineInterface, quiet = false) {
   linked = (await $.store.get('linked')) === true
   gone = numberMap(await $.store.get('gone'))
   stateAt = { blocked: 0, profile: 0, muted: 0, privacy: 0, ...numberMap(await $.store.get('stateAt')) }
+  const savedStatus = await $.store.get('linkStatus')
+  const nextStatus = typeof savedStatus === 'string' ? savedStatus : ''
+  if (nextStatus !== linkStatus) {
+    linkStatus = nextStatus
+    $.ui.status(linkStatus ? 'buddy-chat: ' + linkStatus : undefined)
+  }
   const pending = (await $.store.get('linkPending')) as typeof linkPending
   linkPending = pending && typeof pending.secret === 'string' && typeof pending.until === 'number' ? pending : undefined
   typing = privacy.typing ? asArray<Typing>(await $.store.get('typing')) : []
@@ -1073,7 +1122,7 @@ async function refresh($: EngineInterface, quiet = false) {
   }
 
   const next = JSON.stringify([
-    lang, profile, contacts, blocked, groups, status?.state, privacy, typing, muted,
+    lang, profile, contacts, blocked, groups, status?.state, privacy, typing, muted, linkStatus,
     inbox.map(m => [m.key, m.text.length, m.forwarded, m.edited, m.deleted, m.state, m.deliveredTo?.length, m.readBy?.length]),
   ])
   if (next !== signature) {
@@ -2006,6 +2055,7 @@ export const register: Register = on => {
     const devicesCard = card('devices-card', <Text weight="semibold">{t('devicesTitle')}</Text>,
       <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
         <Text dimColor size="footnote">{linked ? t(primary ? 'devicesLinkedPrimary' : 'devicesLinked') : t('devicesHint')}</Text>
+        {linkStatus && <Text color="claude" weight="semibold">{linkStatus}</Text>}
         {pendingCode
           ? (
             <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
