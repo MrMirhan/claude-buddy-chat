@@ -2688,11 +2688,12 @@ export const register: Register = on => {
       ? group.members.map(m => nameOf(m.id, m.name)).join(', ') + ' · ' + t('groupSecurity')
       : (peer ? subtitle(peer) + ' · ' : '') + security(peer)
 
-    const msgActions = (m: Msg) => {
+    // compact: one-character buttons, for the Desktop bubble's own time row.
+    const msgActions = (m: Msg, compact = false) => {
       if (m.deleted) return null
       const marked = m.key === cursor
       const copyButton = (
-        <Button key={'copy-' + m.key} label={graphic ? t('copyButton') : '⧉'} plain dimColor={!marked} hotkey={marked ? 'c' : undefined}
+        <Button key={'copy-' + m.key} label={graphic && !compact ? t('copyButton') : '⧉'} plain dimColor={!marked} hotkey={marked ? 'c' : undefined}
           onPress={press => copy(m.text, press.surface, t('copiedMsg'))} />
       )
       if (m.mine) {
@@ -2712,14 +2713,14 @@ export const register: Register = on => {
         return (
           <Box flexDirection="row" columnGap={1}>
             {copyButton}
-            <Text dimColor size="caption">{t('forwarded')}</Text>
+            {!compact && <Text dimColor size="caption">{t('forwarded')}</Text>}
           </Box>
         )
       }
       return (
         <Box flexDirection="row" columnGap={1}>
         {copyButton}
-        <Button key={'fwd-' + m.key} label={graphic ? t('forwardButton') : '↗'} plain dimColor={!marked} hotkey={marked ? 'f' : undefined}
+        <Button key={'fwd-' + m.key} label={graphic && !compact ? t('forwardButton') : '↗'} plain dimColor={!marked} hotkey={marked ? 'f' : undefined}
           onPress={async () => {
             inbox = await mutate<Msg>($, 'inbox', cur => cur.map(x => (x.key === m.key ? { ...x, forwarded: true } : x)))
             redraw()
@@ -2784,17 +2785,16 @@ export const register: Register = on => {
                 {m.deleted
                   ? <Text italic color={m.mine ? MINE_SOFT : undefined} dimColor={!m.mine}>{t('deletedMsg')}</Text>
                   : <Text wrap="wrap" color={m.mine ? '#ffffff' : undefined}>{m.text}</Text>}
-                <Box flexDirection="row" justifyContent="flex-end">
+                {/* The actions share the time's row, so showing them on hover changes no height and nothing moves. */}
+                <Box flexDirection="row" justifyContent="flex-end" alignItems="center" columnGap={1}>
+                  <Box display="none" hover={{ display: 'flex' }} flexDirection="row" flexGrow={1}>{msgActions(m, true)}</Box>
                   <Text size="caption" color={m.mine ? MINE_SOFT : undefined} dimColor={!m.mine}>
                     {(m.edited ? t('editedShort') + ' · ' : '') + clock(m.at)}
                   </Text>
                   {ticks(m)}
                 </Box>
               </Box>
-            </Box>
-            {/* Under the bubble, on its side, shown while the pointer is over the message. */}
-            <Box display="none" hover={{ display: 'flex' }} flexDirection="row" columnGap={1} paddingLeft={showFace ? 5 : 1} paddingRight={1}>
-              {msgActions(m)}
+              {!m.mine && m.forwarded && <Text dimColor size="caption">{t('forwarded')}</Text>}
             </Box>
           </Box>
         )
