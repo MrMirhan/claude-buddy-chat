@@ -63,6 +63,25 @@ function setup(on: On, store: Record<string, unknown>, sessionId = 's1'): World 
   return w
 }
 
+// Opens a chat as the user would: a click on the Desktop row (a Client), a press on the terminal chip.
+// Every mounted surface can find and press; terminal and Desktop drawings can also take pointer events.
+type Opener = {
+  find: (query: { key: string }) => Promise<{ type: string } | undefined>
+  press: (target: { key: string }) => Promise<unknown>
+}
+type Pointer = { pointer: (event: { type: 'down' | 'up'; x: number; y: number; button: 'left'; in: string }) => Promise<void> }
+async function openChat(ui: Opener, key: string) {
+  const el = await ui.find({ key })
+  // On a narrow surface with the chat already open, the list is not drawn and there is nothing to click.
+  if (!el) return
+  if (el.type === 'Client') {
+    await (ui as unknown as Pointer).pointer({ type: 'down', x: 1, y: 0, button: 'left', in: key })
+    await (ui as unknown as Pointer).pointer({ type: 'up', x: 1, y: 0, button: 'left', in: key })
+  } else {
+    await ui.press({ key })
+  }
+}
+
 // Runs a /buddy command as the user typing it in the prompt box would.
 const run = ($: Engine, command: string, args = '') =>
   $.command.run({ command, args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
@@ -101,6 +120,7 @@ test('request, accept, profile and a local nickname that never leaves this machi
   await ui.press({ key: 'friend-nick-' + idOf(ayse) })
   await ui.input({ key: 'nick-' + idOf(ayse), text: 'Kanka' })
   await ui.press({ key: 'tab-chats' })
+  await openChat(ui, 'conv-dm:' + idOf(ayse))
   expect((await ui.find({ type: 'Text', text: /Artık arkadaşsınız/ }))).toBeDefined()
   await ui.unmount()
   expect(await list($)).toContain('Kanka · @ayilmaz · Ayşe Yılmaz')
@@ -153,6 +173,7 @@ test('dm is end-to-end encrypted, forged and stranger messages are dropped, os n
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount(pane(surface))
+    await openChat(ui, 'conv-dm:' + idOf(ahmet))
     expect((await ui.find({ type: 'Text', text: /gercek mesaj/ }))).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /sahte|yabanci/ })).toBeUndefined()
     await ui.unmount()
@@ -177,7 +198,7 @@ test('edit and delete: only the author can change a message, both directions', a
   await w.clock.advance(8000)
 
   const ui = await $.ui.mount(pane('desktop'))
-  await ui.press({ key: 'conv-dm:' + idOf(ahmet) })
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
   expect(await ui.find({ type: 'Text', text: /son hali/ })).not.toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /düzenlendi/ })).not.toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /veli bozdu/ })).toBeUndefined()
@@ -259,7 +280,7 @@ test('group: invite from a friend, message from a non-friend member, send fans o
   expect(opened(sent(w, ahmet)[0], ahmet)?.text).toBe('herkese selam')
 
   const ui = await $.ui.mount(pane('terminal'))
-  await ui.press({ key: 'conv-g:0123456789abcdef' })
+  await openChat(ui, 'conv-g:0123456789abcdef')
   expect((await ui.find({ type: 'Text', text: /grupta selam/ }))).toBeDefined()
   await ui.unmount()
 })
@@ -400,6 +421,7 @@ for (const order of ['smaller', 'larger'] as const) {
     )
     await w.clock.advance(8000)
     const ui = await $.ui.mount(pane('desktop'))
+    await openChat(ui, 'conv-dm:' + idOf(friendKp))
     expect(await ui.find({ type: 'Text', text: /kuantum selam/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /klasik mesaj/ })).toBeUndefined()
     await ui.unmount()
@@ -421,8 +443,9 @@ test('desktop opens on the chat list with avatars and previews, terminal goes st
   const desk = await $.ui.mount(pane('desktop'))
   expect(['step1', await desk.find({ type: 'Svg' })]).toEqual(['step1', expect.anything()])
   expect(await desk.find({ key: 'back' })).toBeUndefined()
-  expect((await desk.find({ type: 'Text', text: /liste önizlemesi/ }))?.props?.size).toBe('footnote')
-  await desk.press({ key: 'conv-dm:' + idOf(ahmet) })
+  expect((await desk.find({ type: 'Client', key: 'conv-dm:' + idOf(ahmet) }))).not.toBeUndefined()
+  expect((await desk.find({ type: 'Text', text: /liste önizlemesi/, in: 'conv-dm:' + idOf(ahmet) }))?.props?.size).toBe('footnote')
+  await openChat(desk, 'conv-dm:' + idOf(ahmet))
   expect(['step2', await desk.find({ key: 'back' })]).toEqual(['step2', expect.anything()])
   expect(['step3', await desk.find({ type: 'Text', text: /kuantuma|PQ/ })]).toEqual(['step3', expect.anything()])
   await desk.press({ key: 'back' })
@@ -443,7 +466,7 @@ test('mobile draws without text fields instead of being refused', async ($, on) 
   await start($)
   const ui = await $.ui.mount({ ...pane('desktop'), surface: 'mobile' } as never)
   expect(['list', await ui.find({ key: 'tab-people' })]).toEqual(['list', expect.anything()])
-  await ui.press({ key: 'conv-dm:' + idOf(ahmet) })
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
   expect(['thread', await ui.find({ type: 'Text', text: /buddy-send/ })]).toEqual(['thread', expect.anything()])
   await ui.press({ key: 'back' })
   await ui.press({ key: 'tab-people' })
@@ -519,9 +542,9 @@ test('a wide desktop pane: list beside home, a chat opens beside the list, sendi
   expect(await ui.find({ key: 'conv-dm:' + idOf(ahmet) })).not.toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
   expect(await ui.find({ key: 'compose-dm:' + idOf(ahmet) })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^1$/ })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^1$/, in: 'conv-dm:' + idOf(ahmet) })).not.toBeUndefined()
 
-  await ui.press({ key: 'conv-dm:' + idOf(ahmet) })
+  await openChat(ui, 'conv-dm:' + idOf(ahmet))
   expect(await ui.find({ type: 'Text', text: /^geniş ekran mesajı$/ })).not.toBeUndefined()
   expect(await ui.find({ key: 'conv-dm:' + idOf(veli) })).not.toBeUndefined()
   await ui.input({ key: 'compose-dm:' + idOf(ahmet), text: 'cevap' })
@@ -530,7 +553,7 @@ test('a wide desktop pane: list beside home, a chat opens beside the list, sendi
 
   await ui.press({ key: 'back' })
   expect(await ui.find({ type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^1$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^1$/, in: 'conv-dm:' + idOf(ahmet) })).toBeUndefined()
   await ui.unmount()
 })
 

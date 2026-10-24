@@ -2,6 +2,7 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 import nacl from './vendor/nacl.js'
 import { ml_kem768 } from './vendor/mlkem.js'
 import { LANGS, LANG_NAMES, isKey, isLang, translate, type Key, type Lang, type Vars } from './i18n.js'
+import type { ChatRowProps } from './chat-row.tsx'
 
 // buddy-chat
 // No server of our own. Relay: ntfy.sh (free, no sign-up). Each person's inbox is a topic derived from their public key.
@@ -1052,6 +1053,13 @@ export const register: Register = on => {
     return { result: (await sendText($, conv.id, text)).text }
   })
 
+  // A Desktop chat row posts { open } when it is clicked anywhere.
+  on('ui.message', { requestId: PANE }, async ($, e) => {
+    const open = (e.data as { open?: unknown } | null)?.open
+    if (typeof open === 'string' && conversations().some(c => c.id === open)) await select($, open)
+    return {}
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
     const { Box, Text, Button } = els
@@ -1060,6 +1068,7 @@ export const register: Register = on => {
     // Desktop, VS Code and mobile get the graphic layout; the terminal gets the compact, keyboard-first one.
     const graphic = e.surface !== 'terminal'
     const Svg = graphic && 'Svg' in els ? els.Svg : undefined
+    const Client = e.surface === 'desktop' && 'Client' in els ? els.Client : undefined
     const cols = Math.max(20, e.props.bodyColumns)
     const rows = e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 24
     const now = await $.clock.now()
@@ -1423,6 +1432,20 @@ export const register: Register = on => {
         <Box key={'row-' + c.id} flexDirection="row" columnGap={1} alignItems="center" padding="sm"
           backgroundColor={active ? SELECTED_BG : undefined} hover={{ backgroundColor: active ? SELECTED_BG : HOVER_BG }}>
           {avatar(c.id, c.isGroup ? '#' : c.title, convColor(c), 40)}
+          {Client
+            ? (
+              // The whole text area takes the click on Desktop; VS Code and mobile have no Client and keep the name button.
+              <Client key={'conv-' + c.id} module="./chat-row.tsx" flexGrow={1}
+                props={{
+                  conv: c.id,
+                  title: (c.isGroup ? '# ' : '') + c.title,
+                  preview: previewOf(last),
+                  when: last ? shortWhen(last.at, now) : '',
+                  unread: c.unread,
+                  accent: ACCENT,
+                } satisfies ChatRowProps} />
+            )
+            : (
           <Box flexDirection="column" flexGrow={1} flexShrink={1}>
             <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
               <Button key={'conv-' + c.id} plain onPress={() => select($, c.id)}>
@@ -1435,6 +1458,7 @@ export const register: Register = on => {
               {c.unread > 0 && unreadPill(c.unread)}
             </Box>
           </Box>
+            )}
         </Box>
       )
     }
