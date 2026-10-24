@@ -3423,7 +3423,8 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           {scrollRowTop}
-          <Box key="chat-top" flexDirection="column" height={fullHeight} overflow="hidden" rowGap="sm">
+          {/* Desktop may leave the pane at the end, one row past rest; the blank first row is what that hides. */}
+          <Box key="chat-top" flexDirection="column" height={fullHeight} overflow="hidden" rowGap="sm" paddingTop={1}>
             <Box flexDirection="row" columnGap={1} alignItems="center" flexShrink={0}>
               <Button key="back" label="←" plain hotkey="b" onPress={() => closeThread($)} />
               {avatar('head-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 40)}
