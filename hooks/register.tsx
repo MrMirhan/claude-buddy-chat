@@ -3267,7 +3267,7 @@ export const register: Register = on => {
       const newDay = !prev || !sameDay(prev.at, m.at)
       const sameRun = prev && !newDay && !prev.system && !m.system && prev.from === m.from && m.at - prev.at < 5 * 60_000
       const day = newDay
-        ? <Box key={'day-' + m.key} width="100%" justifyContent="center" marginY={graphic ? 1 : 0}><Text dimColor size="caption">── {dayLabel(m.at, now)} ──</Text></Box>
+        ? <Box key={'day-' + m.key} width="100%" justifyContent="center" marginY={graphic ? 'sm' : 0}><Text dimColor size="caption">── {dayLabel(m.at, now)} ──</Text></Box>
         : null
 
       if (m.system) {
@@ -3424,7 +3424,7 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           {scrollRowTop}
-          <Box key="chat-top" flexDirection="column" height={fullHeight} overflow="hidden" rowGap={1}>
+          <Box key="chat-top" flexDirection="column" height={fullHeight} overflow="hidden" rowGap="sm">
             <Box flexDirection="row" columnGap={1} alignItems="center" flexShrink={0}>
               <Button key="back" label="←" plain hotkey="b" onPress={() => closeThread($)} />
               {avatar('head-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 40)}
@@ -3454,7 +3454,7 @@ export const register: Register = on => {
               )}
             {newerButton}
             {/* The row under the field keeps its focus ring inside the pane, where the clipping cannot reach it. */}
-            <Box flexDirection="row" alignItems="flex-start" columnGap={1} width="100%" flexShrink={0} paddingBottom={1}>
+            <Box flexDirection="row" alignItems="flex-start" columnGap={1} width="100%" flexShrink={0} paddingBottom="sm">
               {attachButton}
               <Box flexDirection="column" alignItems="stretch" flexGrow={1} flexShrink={1}>{composer}</Box>
             </Box>
