@@ -683,9 +683,14 @@ test('desktop: the chat shows what fits the pane, pages older messages and holds
   expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).not.toBeUndefined()
   expect(await shows(ui, { type: 'Text', text: /^satır 100$/ })).toBeUndefined()
 
-  await $.ui.scroll({ component: 'Pane', requestId: 'buddy-chat', offset: 0, by: -1, bodyRows: 40, contentRows: 42, origin: { kind: 'person' } } as never)
+  // A tick is three rows; a short message here takes a bit more, so the second tick moves the window by one.
+  const tick = () => $.ui.scroll({ component: 'Pane', requestId: 'buddy-chat', offset: 0, by: -1, bodyRows: 40, contentRows: 42, origin: { kind: 'person' } } as never)
+  await tick()
   await ui.redraw()
   expect(offsets.at(-1)).toBe(1)
+  expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).toBeDefined()
+  await tick()
+  await ui.redraw()
   expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).toBeUndefined()
   expect((await ui.find({ key: 'newer' }))?.text).toContain('1')
 

@@ -143,6 +143,11 @@ const PAGE_STEP = 8
 // restOffset is that row (0 in the terminal, which has only the row below); restedFor, the chat already put there.
 let restOffset = 0
 let restedFor = ''
+// Desktop: the wheel is summed in rows and the window moves a message once the rows add up to one, so a long
+// message takes more wheel than a short one, as in a scrolled page. avgRows: the rows a message on screen takes.
+let wheelRows = 0
+let avgRows = 3
+const WHEEL_ROWS = 3
 let newestOpen = ''
 
 const composeKey = (conv: string) => 'compose-' + conv + (composeSeq ? '-' + composeSeq : '')
@@ -1306,8 +1311,20 @@ export const register: Register = on => {
   // The pane is held at its rest row and the scroll moves the messages instead: a tick or an arrow by one, a page key by a page.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
     if (!chatShown || e.by === 0 || e.origin?.kind !== 'person') return next(e)
-    const step = Math.min(PAGE_STEP, Math.max(1, Math.round(Math.abs(e.by))))
-    pageBy($, e.by < 0 ? step : -step)
+    if (restOffset === 0) {
+      const step = Math.min(PAGE_STEP, Math.max(1, Math.round(Math.abs(e.by))))
+      pageBy($, e.by < 0 ? step : -step)
+    } else {
+      // The pane has one row to move, so by reads 1 per tick; a tick of a page scrolls about three.
+      const rows = Math.sign(e.by) * Math.max(WHEEL_ROWS, Math.abs(e.by))
+      if (Math.sign(wheelRows) === Math.sign(rows)) wheelRows += rows
+      else wheelRows = rows
+      const steps = Math.trunc(wheelRows / avgRows)
+      if (steps) {
+        wheelRows -= steps * avgRows
+        pageBy($, -Math.max(-PAGE_STEP, Math.min(PAGE_STEP, steps)))
+      }
+    }
     return next({ ...e, offset: restOffset })
   })
 
@@ -1836,6 +1853,7 @@ export const register: Register = on => {
     }
     hiddenAbove = start
     const visible = thread.slice(start, end)
+    if (graphic && visible.length) avgRows = Math.max(1, used / visible.length)
     const below = thread.length - end
     // At the start of the chat the messages hang from the top, so going back never opens a gap above them.
     const align = start === 0 && newerSkip > 0 ? 'flex-start' : 'flex-end'
