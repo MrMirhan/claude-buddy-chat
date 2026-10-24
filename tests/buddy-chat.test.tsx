@@ -700,21 +700,21 @@ test('desktop: the chat shows what fits the pane, pages older messages and holds
   expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).not.toBeUndefined()
   expect(await shows(ui, { type: 'Text', text: /^satır 100$/ })).toBeUndefined()
 
-  // A tick is three rows; a short message here takes a bit more, so the second tick moves the window by one.
+  // A tick counts as one row, and the messages move once the rows add up to a message.
   const tick = () => $.ui.scroll({ component: 'Pane', requestId: 'buddy-chat', offset: 0, by: -1, bodyRows: 40, contentRows: 42, origin: { kind: 'person' } } as never)
   await tick()
   await w.clock.advance(100)
   await ui.redraw()
   expect(offsets.at(-1)).toBe(1)
   expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).toBeDefined()
-  // Ticks close together are summed and move the messages once, after a short pause.
-  await tick()
+  // A burst of ticks is summed and moves the messages once, after a short pause, and by two messages at most.
+  for (let i = 0; i < 30; i++) await tick()
   await ui.redraw()
   expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).toBeDefined()
   await w.clock.advance(100)
   await ui.redraw()
   expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).toBeUndefined()
-  expect((await ui.find({ key: 'newer' }))?.text).toContain('1')
+  expect((await ui.find({ key: 'newer' }))?.text).toContain('2')
 
   await ui.press({ key: 'older' })
   await ui.press({ key: 'newer' })

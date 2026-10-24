@@ -228,11 +228,15 @@ const PAGE_STEP = 8
 // restOffset is that row (0 in the terminal, which has only the row below); restedFor, the chat already put there.
 let restOffset = 0
 let restedFor = ''
+let restQueued = false
+let restTries = 0
 // Desktop: the wheel is summed in rows and the window moves a message once the rows add up to one, so a long
 // message takes more wheel than a short one, as in a scrolled page. avgRows: the rows a message on screen takes.
 let wheelRows = 0
 let avgRows = 3
-const WHEEL_ROWS = 3
+const WHEEL_ROWS = 1
+// At most this many messages move per settled burst of the wheel, so the list never leaps.
+const WHEEL_MAX_STEP = 2
 const WHEEL_SETTLE_MS = 80
 let wheelTimer: { cancel: () => void } | undefined
 let newestOpen = ''
@@ -2428,7 +2432,7 @@ export const register: Register = on => {
       const step = Math.min(PAGE_STEP, Math.max(1, Math.round(Math.abs(e.by))))
       pageBy($, e.by < 0 ? step : -step)
     } else {
-      // The pane has one row to move, so by reads 1 per tick; a tick of a page scrolls about three.
+      // A trackpad sends many small moves; each counts as the row it moved, so a flick does not jump far.
       const rows = Math.sign(e.by) * Math.max(WHEEL_ROWS, Math.abs(e.by))
       if (Math.sign(wheelRows) === Math.sign(rows)) wheelRows += rows
       else wheelRows = rows
@@ -2438,8 +2442,8 @@ export const register: Register = on => {
           wheelTimer = undefined
           const steps = Math.trunc(wheelRows / avgRows)
           if (!steps) return
-          wheelRows -= steps * avgRows
-          pageBy($, -Math.max(-PAGE_STEP, Math.min(PAGE_STEP, steps)))
+          wheelRows = 0
+          pageBy($, -Math.max(-WHEEL_MAX_STEP, Math.min(WHEEL_MAX_STEP, steps)))
         })
       }
     }
@@ -3376,10 +3380,20 @@ export const register: Register = on => {
         </Box>
       )
 
-      if (fullHeight && restedFor !== current.id) {
+      // At the top the wheel cannot go up and raises nothing, so the pane goes back to its rest row whenever a
+      // drawing finds it elsewhere: a chat just opened, the pane shown again, a resize. A few tries per chat at most.
+      if (restedFor !== current.id) {
         restedFor = current.id
-        // After this drawing lands, so the key is there to scroll to.
-        void $.clock.sleep(50).then(() => scrollToRest($)).catch(() => {})
+        restTries = 0
+      }
+      if (e.props.scroll?.offset === restOffset) restTries = 0
+      if (fullHeight && e.surface === 'desktop' && e.props.scroll?.offset !== restOffset && !restQueued && restTries < 5) {
+        restQueued = true
+        restTries++
+        $.clock.after(60, () => {
+          restQueued = false
+          scrollToRest($)
+        })
       }
 
       return (
