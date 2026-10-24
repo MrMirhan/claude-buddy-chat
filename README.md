@@ -24,6 +24,22 @@ buddy-chat is a Claude Code [mod](https://code.claude.com/docs/en/plugins/mods/o
 
 ## Install
 
+### Let Claude install it
+
+Paste this prompt into Claude Code, in the terminal or in the Code tab of the Desktop app:
+
+```text
+Install the buddy-chat plugin for me. Run this command in the shell:
+
+claude plugin install buddy-chat --marketplace MrMirhan/claude-buddy-chat --scope user
+
+If the command fails, show me the error and stop. If it passes, tell me to run /reload-plugins, then /buddy to open the pane.
+```
+
+Claude asks for your permission before it runs the command.
+
+### Install it yourself
+
 At the prompt of a terminal session:
 
 ```

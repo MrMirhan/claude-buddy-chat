@@ -24,6 +24,22 @@ buddy-chat bir Claude Code [mod'u](https://code.claude.com/docs/en/plugins/mods/
 
 ## Kurulum
 
+### Claude'a kurdur
+
+Bu prompt'u Claude Code'a yapıştır. Terminalde de olur, Desktop uygulamasının Code sekmesinde de:
+
+```text
+Install the buddy-chat plugin for me. Run this command in the shell:
+
+claude plugin install buddy-chat --marketplace MrMirhan/claude-buddy-chat --scope user
+
+If the command fails, show me the error and stop. If it passes, tell me to run /reload-plugins, then /buddy to open the pane.
+```
+
+Claude komutu çalıştırmadan önce izin ister.
+
+### Kendin kur
+
 Terminaldeki bir oturumun isteminde:
 
 ```
