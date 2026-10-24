@@ -55,6 +55,13 @@ claude plugin install buddy-chat --marketplace MrMirhan/claude-buddy-chat
 
 Claude Code marketplace'i eklemek isteyip istemediğini sorar. `y` de, sonra user kapsamını seç.
 
+Ya da önce marketplace'i ekle, sonra plugin'i oradan kur:
+
+```
+/plugin marketplace add MrMirhan/claude-buddy-chat
+/plugin install buddy-chat@claude-buddy-chat
+```
+
 Desktop uygulamasında `/plugin` çalışmaz. Orada istem kutusunun yanındaki **+** → **Plugins** → **Add marketplace** ile `MrMirhan/claude-buddy-chat` ekle, sonra **Add plugin** seç.
 
 Kabuktan kurarken açık bir oturum varsa, o oturumda `/reload-plugins` çalıştır.

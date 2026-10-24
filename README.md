@@ -55,6 +55,13 @@ claude plugin install buddy-chat --marketplace MrMirhan/claude-buddy-chat
 
 Claude Code asks you to add the marketplace. Answer `y`, then select the user scope.
 
+Or add the marketplace first, then install the plugin from it:
+
+```
+/plugin marketplace add MrMirhan/claude-buddy-chat
+/plugin install buddy-chat@claude-buddy-chat
+```
+
 In the Desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**. Select **Add marketplace**, enter `MrMirhan/claude-buddy-chat`, then select **Add plugin**.
 
 If you install from a shell while a session is open, run `/reload-plugins` in that session.
