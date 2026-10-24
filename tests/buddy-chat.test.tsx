@@ -584,7 +584,7 @@ test('terminal: the text field does not grab the focus, and a write button with 
   await ui.unmount()
 })
 
-test('a thread is in time order even when replies were stored late, and older messages load on demand and on scroll', async ($, on) => {
+test('terminal: a thread is in time order, holds what fits above the composer, pages, and follows the j/k mark', async ($, on) => {
   const ahmet = nacl.box.keyPair()
   const conv = 'dm:' + idOf(ahmet)
   const msg = (key: string, text: string, at: number, mine: boolean) =>
@@ -595,19 +595,27 @@ test('a thread is in time order even when replies were stored late, and older me
   setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
   await start($)
 
-  // The terminal shows the last 30 messages and scrolls; Desktop pages, tested on its own.
   const ui = await $.ui.mount(pane('terminal'))
-  await openChat(ui, 'conv-' + conv)
   expect(await ui.find({ type: 'Text', text: /^mesaj 34$/ })).not.toBeUndefined()
-  // 36 messages in all: the newest 30 are mesaj 5 to mesaj 34.
-  expect(await ui.find({ type: 'Text', text: /^mesaj 5$/ })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^mesaj 4$/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^en eski cevap$/ })).toBeUndefined()
+  expect(await ui.find({ key: 'compose-' + conv })).not.toBeUndefined()
+  const older = await ui.find({ key: 'older' })
+  const hidden = Number(/(\d+)/.exec(older?.text ?? '')?.[1])
+  expect(hidden).toBeGreaterThan(0)
+  // Everything that is not hidden is drawn, and only that.
+  expect(await ui.find({ type: 'Text', text: new RegExp('^mesaj ' + (hidden - 1) + '$') })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp('^mesaj ' + (hidden - 2) + '$') })).toBeUndefined()
 
   await ui.press({ key: 'older' })
-  expect(await ui.find({ type: 'Text', text: /^mesaj 0$/ })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^en eski cevap$/ })).not.toBeUndefined()
-  expect(await ui.find({ key: 'older' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^mesaj 34$/ })).toBeUndefined()
+  expect((await ui.find({ key: 'newer' }))?.text).toContain('8')
+  await ui.press({ key: 'newer' })
+  expect(await ui.find({ type: 'Text', text: /^mesaj 34$/ })).not.toBeUndefined()
+
+  // Walking the mark up past the window's top drags the window with it.
+  for (let n = 0; n < 36 - hidden + 2; n++) await ui.press({ key: 'nav-up' })
+  expect(await ui.find({ type: 'Text', text: /^mesaj 34$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^[‹›]$/ })).not.toBeUndefined()
   await ui.unmount()
 })
 

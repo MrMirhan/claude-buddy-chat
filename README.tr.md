@@ -68,16 +68,16 @@ Panel her yüzeyde aynı, ama her uygulama kendi görünümüyle çizer.
 - Sohbetler konuşmanın üstünde çip olarak durur, `1`-`9` ile geçilir.
 - Gelen mesajların solunda gönderenin renginde bir çizgi var.
 - `i` yazı alanına geçer. Gönderdikten sonra odak alanda kalır; `Tab` ile alandan çıkılır, `Esc` isteme döner.
-- `k` bir üstteki mesajı, `j` bir alttakini işaretler. İşaretli mesajda `e` düzenler, `x` siler, `f` Claude'a iletir.
-- Yukarı/Aşağı ok, Page Up/Page Down ve fare tekerleği sohbeti kaydırır. Fare tekerleği fullscreen görünüm ister.
+- Sohbet paneli doldurur: sohbetler üstte, yazı alanı ve tuş ipuçları en altta sabit kalır.
+- `k` bir üstteki mesajı, `j` bir alttakini işaretler; mesajlar işaretle birlikte kayar. İşaretli mesajda `e` düzenler, `x` siler, `f` Claude'a iletir.
+- `o` ya da **eski mesajlar** 8 mesaj geri gider, **yeni mesaj** geri döndürür.
 - `Ctrl+X` sonra `Tab` paneli odaklar, `Ctrl+X` sonra `X` kapatır. Butonlara fareyle tıklamak terminalde sadece fullscreen görünümde çalışır.
 
 **Her yerde**
 
 - `✎` mesajını düzenler, `✕` herkesten siler.
 - `↗` gelen mesajı Claude'a iletir; mesajın senden değil arkadaşından geldiği notuyla.
-- Desktop'ta sohbet paneli doldurur: liste ve sohbet başlığı yerinde kalır, yazı alanı hep en altta. **↑ Eski mesajlar** ve **↓ yeni mesaj** butonlarıyla sohbette sayfa sayfa gezilir.
-- Terminalde sohbet en yeni mesajında açılır ve son 30 mesajı gösterir. En üste kaydırınca ya da `o`'ya basınca 20 mesaj daha yüklenir.
+- Sohbet paneli doldurur ve en yeni mesajında açılır. Liste ve sohbet başlığı yerinde kalır, yazı alanı hep en altta. **Eski mesajlar** ve **yeni mesaj** butonlarıyla sohbette sayfa sayfa gezilir.
 - `s` **Sohbetler**'i, `p` **Kişiler**'i açar.
 
 ## Komutlar

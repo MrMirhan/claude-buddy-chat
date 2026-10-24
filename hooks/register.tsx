@@ -97,20 +97,12 @@ let composeSeq = 0
 let addSeq = 0
 let groupSeq = 0
 let pollerAt = 0
-// A chat shows its last THREAD_WINDOW messages plus whatever the user loaded above them; reset when the chat changes.
-let olderExtra = 0
-const THREAD_WINDOW = 30
-const OLDER_PAGE = 20
-// Read by the ui.scroll hook: whether the window sits at the newest message, and what the open chat hides above.
-let atBottom = true
 // Terminal: the message j/k marked; its actions take one key (e, x, f). Empty: no mark.
 let cursor = ''
-let hiddenAbove = 0
-let firstShownKey = ''
-// Desktop: the chat fills the pane's height and clips at the top, so it pages instead of scrolling.
-// newerSkip is how many of the newest messages sit below the window; 0 shows the newest.
+// The chat fills the pane's height with the composer at the bottom, so it pages instead of scrolling the pane.
+// newerSkip is how many of the newest messages sit below the window (0 shows the newest); hiddenAbove, how many above it.
 let newerSkip = 0
-let paged = false
+let hiddenAbove = 0
 const GRAPHIC_WINDOW = 60
 const PAGE_STEP = 8
 
@@ -484,7 +476,6 @@ async function refresh($: EngineInterface, quiet = false) {
   if (next !== signature) {
     signature = next
     $.ui.invalidate('ui.render')
-    if (threadOpen && atBottom) scrollToEnd($)
   }
 }
 
@@ -650,9 +641,8 @@ async function sendText($: EngineInterface, conv: string, text: string): Promise
 
   shown.add(id)
   await addMessages($, [{ key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true }])
+  newerSkip = 0
   $.ui.invalidate('ui.render')
-  atBottom = true
-  scrollToEnd($)
   return result.missed.length ? { ok: false, text: partialText(result.missed), sent: true } : { ok: true, text: t('sent'), sent: true }
 }
 
@@ -817,27 +807,12 @@ async function select($: EngineInterface, conv: string) {
   readAt = marks
   selected = conv
   editing = ''
-  olderExtra = 0
   newerSkip = 0
   cursor = ''
   view = 'chats'
   threadOpen = true
-  atBottom = true
   await $.store.set('readAt', readAt)
   $.ui.invalidate('ui.render')
-  scrollToEnd($)
-}
-
-const scrollToEnd = ($: EngineInterface) => { void $.ui.scroll({ to: 'end', in: PANE }).catch(() => {}) }
-
-// Loads one page of older messages and keeps the message that was at the top where it was.
-function loadOlder($: EngineInterface) {
-  if (paged) return pageBy($, PAGE_STEP)
-  if (hiddenAbove <= 0) return
-  const anchor = firstShownKey
-  olderExtra += OLDER_PAGE
-  $.ui.invalidate('ui.render')
-  if (anchor) void $.ui.scroll({ to: { key: 'msg-' + anchor }, in: PANE, block: 'start' }).catch(() => {})
 }
 
 // Moves the Desktop window: a positive step goes to older messages, a negative one back toward the newest.
@@ -845,7 +820,6 @@ function pageBy($: EngineInterface, step: number) {
   const next = Math.max(0, Math.min(newerSkip + step, hiddenAbove + newerSkip))
   if (next === newerSkip) return
   newerSkip = next
-  atBottom = newerSkip === 0
   $.ui.invalidate('ui.render')
 }
 
@@ -856,7 +830,6 @@ async function closeThread($: EngineInterface) {
   }
   threadOpen = false
   editing = ''
-  olderExtra = 0
   newerSkip = 0
   cursor = ''
   $.ui.invalidate('ui.render')
@@ -1103,12 +1076,8 @@ export const register: Register = on => {
 
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
     const result = await next(e)
-    if (paged && threadOpen) {
-      pageBy($, e.by < 0 ? 3 : -3)
-      return result
-    }
-    atBottom = e.offset + e.bodyRows >= e.contentRows - 1
-    if (threadOpen && e.by < 0 && e.offset <= 0) loadOlder($)
+    // The chat fills the pane, so a wheel or arrow scroll over it pages the messages instead.
+    if (threadOpen && e.by !== 0) pageBy($, e.by < 0 ? 3 : -3)
     return result
   })
 
@@ -1585,23 +1554,40 @@ export const register: Register = on => {
       .sort((a, b) => a.m.at - b.m.at || a.i - b.i)
       .map(x => x.m)
     const editTarget = thread.find(m => m.key === editing && m.mine && !m.deleted)
-    paged = graphic
-    const end = graphic ? Math.max(0, thread.length - newerSkip) : thread.length
-    const visible = graphic
-      ? thread.slice(Math.max(0, end - GRAPHIC_WINDOW), end)
-      : thread.slice(-Math.min(thread.length, THREAD_WINDOW + olderExtra))
-    const hidden = (graphic ? end : thread.length) - visible.length
+    const end = Math.max(0, thread.length - newerSkip)
+    // Terminal rows are cells, so the rows each message takes can be counted and the window holds exactly what fits.
+    // Desktop draws in pixels, so it takes a generous slice and clips what does not fit at the top.
+    const lineWidth = Math.max(10, cols - 8)
+    const linesOf = (text: string) => text.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / lineWidth)), 0)
+    const rowsOf = (m: Msg, prev: Msg | undefined) => {
+      const newDay = !prev || !sameDay(prev.at, m.at)
+      const sameRun = !!prev && !newDay && !prev.system && !m.system && prev.from === m.from && m.at - prev.at < 5 * 60_000
+      // An incoming message's quote bar adds a blank row above and below it.
+      return (newDay ? 1 : 0) + (m.system || sameRun ? 0 : 1) + linesOf(textOf(m)) + (m.system || m.mine ? 0 : 2)
+    }
+    const chipRows = Math.ceil(convs.reduce((n, c) => n + c.title.length + 6, 0) / cols)
+    const room = Math.max(4, (fullHeight ?? 24) - 11 - chipRows)
+    let start = graphic ? Math.max(0, end - GRAPHIC_WINDOW) : end
+    if (!graphic) {
+      let used = 0
+      while (start > 0) {
+        const rowsNeeded = rowsOf(thread[start - 1]!, thread[start - 2])
+        if (used + rowsNeeded > room && start < end) break
+        used += rowsNeeded
+        start--
+      }
+    }
+    const visible = thread.slice(start, end)
     const below = thread.length - end
-    hiddenAbove = graphic ? Math.max(0, end - 1) : hidden
-    firstShownKey = visible[0]?.key ?? ''
+    hiddenAbove = graphic ? Math.max(0, end - 1) : start
     // On Desktop the window clips older messages at the top, so how many are out of sight is not known: offer older ones while any exist.
-    const olderButton = (graphic ? end > PAGE_STEP : hidden > 0) && (
+    const olderButton = (graphic ? end > PAGE_STEP : start > 0) && (
       <Box justifyContent="center">
-        <Button key="older" label={graphic ? t('olderPage') : t('olderMessages', { count: hidden })} plain dimColor
-          hotkey={graphic ? undefined : 'o'} onPress={() => loadOlder($)} />
+        <Button key="older" label={graphic ? t('olderPage') : t('olderMessages', { count: start })} plain dimColor
+          hotkey={graphic ? undefined : 'o'} onPress={() => pageBy($, PAGE_STEP)} />
       </Box>
     )
-    const newerButton = graphic && below > 0 && (
+    const newerButton = below > 0 && (
       <Box justifyContent="center">
         <Button key="newer" label={t('newerMessages', { count: below })} plain dimColor onPress={() => pageBy($, -PAGE_STEP)} />
       </Box>
@@ -1781,23 +1767,24 @@ export const register: Register = on => {
 
     // k walks up from the newest message, j walks back down; past the newest the mark clears and the window follows new messages again.
     const moveCursor = (step: 1 | -1) => {
-      const marks = visible.filter(m => !m.system)
+      const marks = thread.filter(m => !m.system)
       const at = cursor ? marks.findIndex(m => m.key === cursor) : marks.length
       const to = at + step
-      if (to < 0) {
-        loadOlder($)
-        return
-      }
+      if (to < 0) return
       cursor = to >= marks.length ? '' : marks[to]?.key ?? ''
-      atBottom = !cursor
+      if (!cursor) {
+        newerSkip = 0
+      } else {
+        // When the mark leaves the window, the window follows so the marked message is the newest one shown.
+        const index = thread.findIndex(m => m.key === cursor)
+        if (index < start || index >= end) newerSkip = thread.length - index - 1
+      }
       redraw()
-      if (cursor) void $.ui.scroll({ to: { key: 'msg-' + cursor }, in: PANE, block: 'nearest' }).catch(() => {})
-      else scrollToEnd($)
     }
 
     const rule = <Text dimColor>{'─'.repeat(cols)}</Text>
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" height={fullHeight} overflow="hidden">
         {header}
         <Box flexDirection="row" columnGap={2} flexWrap="wrap" marginTop={1}>
           {convs.map((c, i) => (
@@ -1810,8 +1797,11 @@ export const register: Register = on => {
         {rule}
         <Text dimColor wrap="truncate-end">{securityLine}</Text>
         {olderButton}
-        {thread.length === 0 && <Box marginY={1}><Text dimColor>{t('emptyThread')}</Text></Box>}
-        <Box flexDirection="column">{rowsView}</Box>
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} justifyContent="flex-end" overflow="hidden">
+          {thread.length === 0 && <Text dimColor>{t('emptyThread')}</Text>}
+          {rowsView}
+        </Box>
+        {newerButton}
         {rule}
         <Box flexDirection="row" columnGap={1}>
           <Box flexGrow={1} flexShrink={1}>{composer}</Box>
