@@ -81,15 +81,15 @@ Both of you must install buddy-chat.
 
 ## The pane
 
-The pane is the same on every surface. Each app draws it in its own style.
+The pane has three views. **Chats** lists your conversations and opens one. **People** holds your add line, adding a friend, requests, friends, groups and blocked people. **Settings** holds your profile, privacy and notification switches, language, devices, recovery and backup, and the version.
 
 **Desktop app and VS Code extension**
 
-- A wide pane shows the chat list beside your home view: your Buddy ID, adding a friend and requests. Select a chat to open it.
-- An open chat takes the whole pane and scrolls with the mouse wheel or the trackpad. It opens at the newest message and shows the last 40. Select **older messages** at the top to load 20 more. Select `←` to go back to the list.
-- The chat list shows a colored avatar, the last message, the time and the number of unread messages. With more than 5 chats, a search field filters the list.
-- Your messages show in orange bubbles on the right. Incoming messages show in grey bubbles on the left. Move the pointer over a message to show its actions.
-- The **People** tab shows your profile card, requests, friends, groups and blocked people.
+- A wide pane shows the chat list beside your home view. The list shows a colored avatar, the last message, the time and the number of unread messages. With more than 5 chats, a search field filters the list. **People** and **Settings** are at the bottom of the list.
+- An open chat keeps its header at the top and the text field at the bottom, and the messages move between them. Scroll with the mouse wheel or the trackpad, or select **older messages** and **newer messages**. Past the oldest message in Claude Code's store, older messages come back from the history files. Select `←` to go back to the list.
+- Your messages show in orange bubbles on the right, with their state: ◷ sending, ✓ sent, ✓✓ delivered, blue ✓✓ read. Incoming messages show in grey bubbles on the left. Move the pointer over a message to show its actions in the row under it.
+- Select 📎 to send a file of up to 3 MB. A file shows as a card with its name and size, **Open** and, for audio, ▶. `➤` sends the text.
+- 🔔 in the header mutes or unmutes the chat. "typing…" shows under the name while your friend types.
 
 **Terminal**
 
@@ -97,16 +97,17 @@ The pane is the same on every surface. Each app draws it in its own style.
 - A bar in the sender's color marks each incoming message.
 - Press `i` to type in the text field. After you send, the focus stays in the field. Press `Tab` to leave it, or `Esc` to go back to the prompt.
 - The chat fills the pane: the chats stay at the top, and the text field and the key hints stay at the bottom.
-- Press `k` to mark the message above and `j` to mark the one below. The messages move with the mark. On the marked message, `e` edits, `x` deletes and `f` sends it to Claude.
+- Press `k` to mark the message above and `j` to mark the one below. The messages move with the mark. On the marked message, `e` edits, `x` deletes, `c` copies and `f` sends it to Claude.
 - Press `o`, or select **older messages**, to go back 8 messages. Select **newer messages** to come back.
+- `a` sends a file and `m` mutes the chat.
 - Press `Ctrl+X` then `Tab` to focus the pane, and `Ctrl+X` then `X` to close it. In the terminal, mouse clicks on buttons work only in fullscreen rendering.
 
 **On all surfaces**
 
-- `✎` edits your message. `✕` deletes it for everyone.
-- `↗` sends an incoming message to Claude, with a note that it comes from your friend and not from you.
-- In the terminal, a chat fills the pane: the chats stay at the top and the text field at the bottom. Select **older messages** and **newer messages** to page through it.
-- `s` opens **Chats** and `p` opens **People**.
+- `⧉` copies a message. `✎` edits your message. `✕` deletes it for everyone.
+- `↗ Ask Claude` sends an incoming message to Claude, with a note that it comes from your friend and not from you. For a file, Claude also gets the path where it was saved.
+- `s` opens **Chats**, `p` opens **People** and `g` opens **Settings**.
+- A pane that was open when a session ended opens again in the next session. Close it by hand to stop that.
 
 ## Commands
 
@@ -128,7 +129,7 @@ You can name a person by their nickname, their display name or their `@username`
 
 ## Language
 
-English is the default. To use Turkish, run `/buddy-lang tr`, or select **Türkçe** in the **People** tab. The pane changes at once. Command descriptions change the next time Claude Code starts.
+English is the default. To use Turkish, run `/buddy-lang tr`, or select **Türkçe** in **Settings**. The pane changes at once. Command descriptions change the next time Claude Code starts.
 
 ## Claude and buddy-chat
 
@@ -138,13 +139,14 @@ English is the default. To use Turkish, run `/buddy-lang tr`, or select **Türk�
 
 ## How it works
 
-- **Identity.** On first start, buddy-chat makes an X25519 key pair and an ML-KEM-768 key pair on your machine. Your ID is your X25519 public key. You can share it. The secret keys stay in Claude Code's plugin store on your machine.
+- **Identity.** On first start, buddy-chat draws 16 random bytes on your machine, which your 12 recovery words hold, and makes an X25519 key pair and an ML-KEM-768 key pair from them. Your ID is your X25519 public key. You can share it. The secret keys stay in Claude Code's plugin store on your machine.
 - **Inbox.** Each ID has an ntfy.sh topic that comes from a hash of the ID. To send, buddy-chat posts a sealed message to the recipient's topic. One session on each machine receives for the machine. It keeps one request to its topic open with `curl`, so ntfy.sh pushes each message as soon as it arrives. If `curl` is not available, that session polls the topic every 8 seconds. Other open sessions read the shared store.
 - **Encryption.** Before the handshake is complete, each message is sealed with `nacl.box` (X25519 and XSalsa20-Poly1305). Only the recipient can open it, and the recipient knows who sent it.
 - **Quantum resistance.** After two people become friends, their plugins run an ML-KEM-768 (FIPS 203) handshake on their own. After that, each message key comes from both the X25519 secret and the ML-KEM secret, as in Signal's PQXDH and Apple's iMessage PQ3. Traffic that someone records today stays protected from a future quantum computer. If the ML-KEM code has a bug, X25519 still protects the message. After the handshake, buddy-chat refuses classic-sealed content from that friend. The **People** tab shows `PQ` beside each friend whose handshake is complete.
 - **Requests.** buddy-chat drops messages from people who are not your friends. Requests and replies are also sealed and authenticated.
 - **Groups.** Each group message is sealed for each member and sent to each member. Members who are your friends get the quantum-resistant key. Other members get X25519. Only the person who created the group can change its members.
 - **Edit and delete.** Your friend's plugin applies the change. It cannot undo a screenshot or a changed client.
+- **Files.** A file is sealed with a key of its own (XSalsa20-Poly1305) and posted to ntfy.sh as an attachment. The message that points to it carries that key, sealed for each recipient like any message, so ntfy.sh sees only sealed bytes. The recipient's plugin fetches the file, opens it and saves it under `~/Downloads/buddy-chat/`.
 - **Receipts and typing.** Delivered and read receipts and the typing signal are sealed messages too. A receipt counts only when it comes from a person the message went to.
 - **Resend.** If a friend whose version sends receipts did not confirm a message, buddy-chat sends it again every 11 hours, for up to 7 days. The friend's plugin drops a copy it already has.
 - **Linked devices.** On the new device, select **Settings → Devices → This is the new device** (or run `/buddy-link`). Paste the code on the device that has your account. That device seals your keys, contacts, groups, settings and recent messages with a key from the code and posts them to a topic that only the code names. The new device opens them and uses the same identity. After that, each device seals a copy of what changes (sent messages, edits, contacts, settings) for itself and posts it to your own topic. A device that was away for more than 5 minutes asks the others for what it missed. The device that made the identity runs the ML-KEM handshakes, because two devices would agree on two different keys.
@@ -178,6 +180,8 @@ The words do not hold contacts or messages. For those, select **Choose a backup 
 
 ## Update notes
 
+- Both people need the same features: receipts and typing need 0.10 or later on both sides, files 0.19 or later, and linked devices the same version on each device.
+- To 0.17 or later: an account made earlier keeps its keys and gets 24 recovery words. Accounts made from 0.17 on get 12.
 - From 0.4 to 0.5 or later: all data stays. The PQ handshake runs when both people have 0.5 or later.
 - From 0.3: your keys and friends stay. The names you gave friends become nicknames.
 - From 0.1 or 0.2: the old data is deleted and a new ID is made.

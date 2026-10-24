@@ -6,7 +6,7 @@
     {
       "name": "buddy-chat",
       "source": "./",
-      "description": "End-to-end encrypted, quantum-resistant chat between Claude Code users: direct messages and groups"
+      "description": "End-to-end encrypted, quantum-resistant chat between Claude Code users: direct messages, groups, files, read receipts and linked devices"
     }
   ]
 }

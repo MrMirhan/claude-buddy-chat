@@ -81,15 +81,15 @@ Kabuktan kurarken açık bir oturum varsa, o oturumda `/reload-plugins` çalış
 
 ## Panel
 
-Panel her yüzeyde aynı, ama her uygulama kendi görünümüyle çizer.
+Panelin üç görünümü var. **Sohbetler** konuşmalarını listeler ve açar. **Kişiler**'de ekleme satırın, arkadaş ekleme, istekler, arkadaşlar, gruplar ve engellenenler var. **Ayarlar**'da profilin, gizlilik ve bildirim ayarları, dil, cihazlar, kurtarma ve yedek ile sürüm numarası var.
 
 **Desktop ve VS Code**
 
-- Geniş panelde sohbet listesi ana sayfanın yanında durur: Buddy ID'n, arkadaş ekleme ve istekler. Sohbete tıklayınca açılır.
-- Açık sohbet tüm paneli kaplar ve fare tekerleği ya da trackpad ile kayar. En yeni mesajda açılır, son 40 mesajı gösterir. En üstteki **eski mesajlar** 20 mesaj daha yükler. `←` listeye döner.
-- Sohbet listesinde renkli avatar, son mesaj, saat ve okunmamış sayısı görünür. 5'ten fazla sohbet varsa bir arama alanı listeyi süzer.
-- Senin mesajların sağda turuncu balonlarda, gelenler solda gri balonlarda. Mesajın işlemleri, üzerine gelince görünür.
-- **Kişiler** sekmesinde profil kartın, istekler, arkadaşlar, gruplar ve engellenenler var.
+- Geniş panelde sohbet listesi ana sayfanın yanında durur. Listede renkli avatar, son mesaj, saat ve okunmamış sayısı görünür. 5'ten fazla sohbet varsa bir arama alanı listeyi süzer. **Kişiler** ve **Ayarlar** listenin altında.
+- Açık sohbette başlık üstte, yazı alanı altta sabit kalır; mesajlar ikisinin arasında kayar. Fare tekerleği ya da trackpad ile kaydır, ya da **eski mesajlar** ve **yeni mesajlar**'ı seç. Claude Code deposundaki en eski mesajın da ötesine geçince daha eski mesajlar geçmiş dosyalarından geri gelir. `←` listeye döner.
+- Senin mesajların sağda turuncu balonlarda, durumlarıyla birlikte: ◷ gönderiliyor, ✓ gönderildi, ✓✓ iletildi, mavi ✓✓ okundu. Gelenler solda gri balonlarda. Bir mesajın üzerine gelince işlemleri altındaki satırda görünür.
+- 📎 ile 3 MB'a kadar dosya gönderirsin. Dosya, adı ve boyutuyla bir kart olarak görünür; **Aç** düğmesi ve ses dosyalarında ▶ vardır. `➤` yazıyı gönderir.
+- Başlıktaki 🔔 sohbeti sessize alır ya da sesini açar. Arkadaşın yazarken adının altında "yazıyor…" görünür.
 
 **Terminal**
 
@@ -97,16 +97,17 @@ Panel her yüzeyde aynı, ama her uygulama kendi görünümüyle çizer.
 - Gelen mesajların solunda gönderenin renginde bir çizgi var.
 - `i` yazı alanına geçer. Gönderdikten sonra odak alanda kalır; `Tab` ile alandan çıkılır, `Esc` isteme döner.
 - Sohbet paneli doldurur: sohbetler üstte, yazı alanı ve tuş ipuçları en altta sabit kalır.
-- `k` bir üstteki mesajı, `j` bir alttakini işaretler; mesajlar işaretle birlikte kayar. İşaretli mesajda `e` düzenler, `x` siler, `f` Claude'a iletir.
-- `o` ya da **eski mesajlar** 8 mesaj geri gider, **yeni mesaj** geri döndürür.
+- `k` bir üstteki mesajı, `j` bir alttakini işaretler; mesajlar işaretle birlikte kayar. İşaretli mesajda `e` düzenler, `x` siler, `c` kopyalar, `f` Claude'a iletir.
+- `o` ya da **eski mesajlar** 8 mesaj geri gider, **yeni mesajlar** geri döndürür.
+- `a` dosya gönderir, `m` sohbeti sessize alır.
 - `Ctrl+X` sonra `Tab` paneli odaklar, `Ctrl+X` sonra `X` kapatır. Butonlara fareyle tıklamak terminalde sadece fullscreen görünümde çalışır.
 
 **Her yerde**
 
-- `✎` mesajını düzenler, `✕` herkesten siler.
-- `↗` gelen mesajı Claude'a iletir; mesajın senden değil arkadaşından geldiği notuyla.
-- Terminalde sohbet paneli doldurur: sohbetler üstte, yazı alanı en altta kalır. **Eski mesajlar** ve **yeni mesaj** butonlarıyla sayfa sayfa gezilir.
-- `s` **Sohbetler**'i, `p` **Kişiler**'i açar.
+- `⧉` mesajı kopyalar. `✎` mesajını düzenler, `✕` herkesten siler.
+- `↗ Claude'a ilet` gelen mesajı Claude'a iletir; mesajın senden değil arkadaşından geldiği notuyla. Dosyalarda Claude, dosyanın kaydedildiği yolu da alır.
+- `s` **Sohbetler**'i, `p` **Kişiler**'i, `g` **Ayarlar**'ı açar.
+- Bir oturum biterken açık olan panel, bir sonraki oturumda yeniden açılır. Bunu durdurmak için paneli elle kapat.
 
 ## Komutlar
 
@@ -128,7 +129,7 @@ Bir kişiyi takma adıyla, görünen adıyla ya da `@kullanıcıadı` ile anabil
 
 ## Dil
 
-Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da **Kişiler** sekmesinde **Türkçe**'yi seç. Panel hemen değişir. Komut açıklamaları Claude Code'un bir sonraki açılışında değişir.
+Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da **Ayarlar**'da **Türkçe**'yi seç. Panel hemen değişir. Komut açıklamaları Claude Code'un bir sonraki açılışında değişir.
 
 ## Claude ve buddy-chat
 
@@ -138,13 +139,14 @@ Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da *
 
 ## Nasıl çalışır
 
-- **Kimlik.** İlk açılışta buddy-chat bilgisayarında bir X25519 ve bir ML-KEM-768 anahtar çifti üretir. ID'n X25519 açık anahtarın; paylaşmak sorun değil. Gizli anahtarlar bilgisayarında, Claude Code'un plugin kaydında durur.
+- **Kimlik.** İlk açılışta buddy-chat bilgisayarında 16 rastgele bayt üretir; 12 kurtarma kelimen bunları taşır. Bir X25519 ve bir ML-KEM-768 anahtar çifti bu baytlardan üretilir. ID'n X25519 açık anahtarın; paylaşmak sorun değil. Gizli anahtarlar bilgisayarında, Claude Code'un plugin kaydında durur.
 - **Gelen kutusu.** Her ID'nin, ID'nin hash'inden türeyen bir ntfy.sh topic'i var. Gönderirken buddy-chat şifreli zarfı alıcının topic'ine bırakır. Her bilgisayarda bir oturum o bilgisayar adına mesaj alır. Bu oturum `curl` ile topic'e açık bir bağlantı tutar; ntfy.sh her mesajı geldiği anda iletir. `curl` yoksa topic'i 8 saniyede bir yoklar. Diğer açık oturumlar ortak kayıttan okur.
 - **Şifreleme.** El sıkışma bitmeden her mesaj `nacl.box` (X25519 ve XSalsa20-Poly1305) ile şifrelenir. Sadece alıcı açabilir ve kimin gönderdiğini bilir.
 - **Kuantuma dayanıklılık.** İki kişi arkadaş olunca plugin'leri kendiliğinden bir ML-KEM-768 (FIPS 203) el sıkışması yapar. Ondan sonra her mesajın anahtarı X25519 ve ML-KEM sırlarının ikisinden türer; Signal'in PQXDH'ı ve Apple'ın iMessage PQ3'ü de bu yaklaşımı kullanır. Bugün kaydedilen trafik ileride bir kuantum bilgisayarla çözülemez. ML-KEM kodunda bir hata çıksa bile X25519 korumaya devam eder. El sıkışmadan sonra o arkadaştan gelen klasik şifreli içerik reddedilir. **Kişiler** sekmesinde el sıkışması biten arkadaşın yanında `PQ` yazar.
 - **İstekler.** Arkadaşın olmayan birinin mesajı düşer. İstek ve kabul de şifreli ve imzalıdır.
 - **Gruplar.** Her grup mesajı her üyeye ayrı şifrelenip gönderilir. Arkadaşın olan üyelere kuantuma dayanıklı anahtarla, olmayanlara X25519 ile. Üyeleri sadece grubu kuran değiştirebilir.
 - **Düzenleme ve silme.** Değişikliği arkadaşının plugin'i uygular. Ekran görüntüsünü ya da değiştirilmiş bir istemciyi geri alamaz.
+- **Dosyalar.** Bir dosya kendine ait bir anahtarla (XSalsa20-Poly1305) şifrelenir ve ntfy.sh'a ek olarak bırakılır. Ona işaret eden mesaj bu anahtarı taşır ve her mesaj gibi her alıcı için ayrı şifrelenir; ntfy.sh sadece şifreli baytları görür. Alıcının plugin'i dosyayı indirir, çözer ve `~/Downloads/buddy-chat/` altına kaydeder.
 - **Okundu bilgisi ve yazıyor.** İletildi ve okundu bilgileri ile yazıyor sinyali de şifreli mesajdır. Bir bilgi, sadece mesajın gittiği kişiden geldiyse sayılır.
 - **Yeniden gönderme.** Okundu bilgisi gönderen bir sürümdeki arkadaş bir mesajı onaylamazsa buddy-chat onu 11 saatte bir, en fazla 7 gün boyunca yeniden gönderir. Arkadaşının plugin'i zaten aldığı kopyayı atar.
 - **Bağlı cihazlar.** Yeni cihazda **Ayarlar → Cihazlar → Yeni cihaz bu**'yu seç (ya da `/buddy-link` çalıştır). Kodu hesabının olduğu cihaza yapıştır. O cihaz anahtarlarını, kişilerini, gruplarını, ayarlarını ve son mesajlarını koddan türeyen bir anahtarla şifreler ve sadece kodun bildiği bir topic'e bırakır. Yeni cihaz bunları açar ve aynı kimliği kullanır. Sonrasında her cihaz değişenlerin (gönderilen mesajlar, düzenlemeler, kişiler, ayarlar) şifreli bir kopyasını kendi topic'ine bırakır. 5 dakikadan uzun ortada olmayan bir cihaz kaçırdıklarını diğerlerinden ister. ML-KEM el sıkışmalarını kimliği ilk oluşturan cihaz yapar; iki cihaz yapsa iki farklı anahtar çıkar.
@@ -178,6 +180,8 @@ Kelimeler kişileri ve mesajları içermez. Onlar için aynı karttaki **Yedek k
 
 ## Güncelleme notları
 
+- Özellikler için iki tarafın da uygun sürümde olması gerekir: okundu bilgisi ve yazıyor için 0.10 ve sonrası, dosyalar için 0.19 ve sonrası, bağlı cihazlar için her cihazda aynı sürüm.
+- 0.17 ve sonrasına: daha önce oluşmuş bir hesap anahtarlarını korur ve 24 kurtarma kelimesi alır. 0.17'den itibaren oluşan hesapların 12 kelimesi vardır.
 - 0.4'ten 0.5 ve sonrasına: bütün veriler kalır. İki taraf da 0.5 veya sonrasına geçince PQ el sıkışması yapılır.
 - 0.3'ten: anahtarların ve arkadaşların kalır. Arkadaşlarına verdiğin adlar takma ad olur.
 - 0.1 ya da 0.2'den: eski veriler silinir, yeni bir ID oluşur.
