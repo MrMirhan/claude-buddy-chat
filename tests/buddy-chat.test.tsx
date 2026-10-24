@@ -82,20 +82,9 @@ async function openChat(ui: Opener, key: string) {
   }
 }
 
-// The chat frame on Desktop: the Svg inside the Box keyed chat-frame, whose source is the messages' HTML.
-async function frameSource(ui: { find: (q: never) => Promise<unknown> }): Promise<string> {
-  const box = (await ui.find({ key: 'chat-frame' } as never)) as { children?: { type?: string; props?: { source?: string } }[] } | undefined
-  return box?.children?.find(c => c.type === 'Svg')?.props?.source ?? ''
-}
-
-// Finds text on any surface: as a Text element, or on Desktop inside the chat frame's HTML.
+// Finds a Text element by its text.
 async function shows(ui: { find: (q: never) => Promise<unknown> }, query: { type: 'Text'; text: RegExp }) {
-  const found = (await ui.find(query as never)) as { text?: string } | undefined
-  if (found) return found
-  const source = await frameSource(ui)
-  const inner = new RegExp(query.text.source.replace(/^\^/, '>').replace(/\$$/, '<'))
-  const hit = inner.exec(source) ?? query.text.exec(source)
-  return hit ? { text: hit[0].replace(/^>|<$/g, '') } : undefined
+  return (await ui.find(query as never)) as { text?: string } | undefined
 }
 
 // Runs a /buddy command as the user typing it in the prompt box would.
@@ -667,29 +656,35 @@ test('terminal: j/k mark messages, the marked one takes e/x/f, and People moved 
   await ui.unmount()
 })
 
-test('desktop: the chat frame holds the newest 150 messages and loads 100 older ones at a time', async ($, on) => {
+test('desktop: the chat shows what fits the pane, pages older messages and holds the pane on its rest row', async ($, on) => {
   const ahmet = nacl.box.keyPair()
   const conv = 'dm:' + idOf(ahmet)
   const inbox = Array.from({ length: 200 }, (_, i) =>
     ({ key: 'p' + i, conv, from: idOf(ahmet), name: 'A', text: 'satır ' + i, at: (i + 1) * 1000, mine: false }))
+  const offsets: number[] = []
+  on('ui.scroll', (_, e) => { offsets.push((e as { offset: number }).offset); return {} as never })
   setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
   await start($)
   const wide = { ...pane('desktop'), props: { ...pane('desktop').props, bodyColumns: 140 } }
   const ui = await $.ui.mount(wide)
   await openChat(ui, 'conv-' + conv)
-  const box = await ui.find({ key: 'chat-frame' })
-  const frame = (box?.children as { type?: string; props?: { isInteractive?: boolean } }[] | undefined)?.find(c => c.type === 'Svg')
-  expect(frame?.props?.isInteractive).toBe(true)
-  expect(await frameSource(ui)).toContain('overflow-y: auto')
+  expect(await ui.find({ key: 'chat-top' })).not.toBeUndefined()
+  expect(await ui.find({ key: 'scroll-row-top' })).not.toBeUndefined()
+  expect(await ui.find({ key: 'scroll-row' })).not.toBeUndefined()
   expect(await ui.find({ key: 'compose-' + conv })).not.toBeUndefined()
   expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).not.toBeUndefined()
-  expect(await shows(ui, { type: 'Text', text: /^satır 50$/ })).not.toBeUndefined()
-  expect(await shows(ui, { type: 'Text', text: /^satır 49$/ })).toBeUndefined()
-  expect((await ui.find({ key: 'older' }))?.text).toContain('50')
+  expect(await shows(ui, { type: 'Text', text: /^satır 100$/ })).toBeUndefined()
+
+  await $.ui.scroll({ component: 'Pane', requestId: 'buddy-chat', offset: 0, by: -1, bodyRows: 40, contentRows: 42, origin: { kind: 'person' } } as never)
+  await ui.redraw()
+  expect(offsets.at(-1)).toBe(1)
+  expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).toBeUndefined()
+  expect((await ui.find({ key: 'newer' }))?.text).toContain('1')
 
   await ui.press({ key: 'older' })
-  expect(await shows(ui, { type: 'Text', text: /^satır 0$/ })).not.toBeUndefined()
-  expect(await ui.find({ key: 'older' })).toBeUndefined()
+  await ui.press({ key: 'newer' })
+  await ui.press({ key: 'newer' })
+  expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).not.toBeUndefined()
   await ui.unmount()
 })
 
@@ -713,25 +708,19 @@ test('a wheel or arrow scroll over a chat pages its messages and holds the pane 
   await ui.unmount()
 })
 
-test('desktop frame: a buddy cannot inject markup, and long histories stay under the Svg size limit', async ($, on) => {
+test('desktop: long messages and markup stay text', async ($, on) => {
   const ahmet = nacl.box.keyPair()
   const conv = 'dm:' + idOf(ahmet)
-  const evil = `<img src="https://evil.example/t.png"><style>*{display:none}</style>"'&`
-  const long = 'x'.repeat(3000)
+  const evil = `<img src="https://evil.example/t.png">`
   const inbox = [
-    ...Array.from({ length: 150 }, (_, i) => ({ key: 'l' + i, conv, from: idOf(ahmet), name: 'A', text: long, at: (i + 1) * 1000, mine: false })),
-    { key: 'evil', conv, from: idOf(ahmet), name: '<b>A</b>', text: evil, at: 999_999, mine: false },
+    ...Array.from({ length: 150 }, (_, i) => ({ key: 'l' + i, conv, from: idOf(ahmet), name: 'A', text: 'x'.repeat(3000), at: (i + 1) * 1000, mine: false })),
+    { key: 'evil', conv, from: idOf(ahmet), name: 'A', text: evil, at: 999_999, mine: false },
   ]
   setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
   await start($)
   const ui = await $.ui.mount(pane('desktop'))
   await openChat(ui, 'conv-' + conv)
-  const source = await frameSource(ui)
-  expect(source.length).toBeLessThan(131_072)
-  expect(source).not.toContain('<img')
-  expect(source).not.toContain('evil.example/t.png">')
-  expect(source).toContain('&lt;img src=&quot;https://evil.example/t.png&quot;&gt;')
-  expect((source.match(/<style>/g) ?? []).length).toBe(1)
+  expect((await shows(ui, { type: 'Text', text: /evil\.example/ }))?.text).toBe(evil)
   expect((await ui.find({ key: 'older' }))?.text).toBeDefined()
   await ui.unmount()
 })

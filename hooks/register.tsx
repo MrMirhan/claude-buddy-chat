@@ -3,7 +3,6 @@ import nacl from './vendor/nacl.js'
 import { ml_kem768 } from './vendor/mlkem.js'
 import { LANGS, LANG_NAMES, isKey, isLang, translate, type Key, type Lang, type Vars } from './i18n.js'
 import type { ChatRowProps } from './chat-row.tsx'
-import { chatFrame, type FrameMessage } from './chat-frame.js'
 
 // buddy-chat
 // No server of our own. Relay: ntfy.sh (free, no sign-up). Each person's inbox is a topic derived from their public key.
@@ -107,16 +106,12 @@ let hiddenAbove = 0
 // Set while a chat is drawn: the ui.scroll hook then turns the scroll into paging.
 let chatShown = false
 const PAGE_STEP = 8
-// Desktop: the chat frame holds the last DESKTOP_WINDOW messages plus the pages loaded above them,
-// within FRAME_BUDGET characters, since an Svg's source may be 131,072 characters at most.
-const DESKTOP_WINDOW = 150
-const OLDER_PAGE = 100
-const FRAME_BUDGET = 120_000
-// Desktop gives the pane's height in rows; the frame needs pixels. These are first estimates, to be measured.
-const ROW_PX = 16
-const FRAME_CHROME_PX = 210
-let diagWritten = ''
-let olderExtra = 0
+// Desktop scrolls a pane's body natively and raises ui.scroll only after a move, and only when the body has room
+// to move. So the chat is drawn between two blank rows and held on the row under the top one: the wheel can always
+// move it one row either way, and the hook pages the messages and puts the pane back.
+// restOffset is that row (0 in the terminal, which has only the row below); restedFor, the chat already put there.
+let restOffset = 0
+let restedFor = ''
 let newestOpen = ''
 
 const composeKey = (conv: string) => 'compose-' + conv + (composeSeq ? '-' + composeSeq : '')
@@ -495,7 +490,7 @@ async function refresh($: EngineInterface, quiet = false) {
   if (newest !== newestOpen) {
     const moved = !!newestOpen
     newestOpen = newest
-    if (moved && threadOpen && olderExtra === 0) scrollToEnd($)
+    if (moved && threadOpen && newerSkip === 0) scrollToRest($)
   }
 }
 
@@ -663,7 +658,7 @@ async function sendText($: EngineInterface, conv: string, text: string): Promise
   await addMessages($, [{ key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true }])
   newerSkip = 0
   $.ui.invalidate('ui.render')
-  scrollToEnd($)
+  scrollToRest($)
   return result.missed.length ? { ok: false, text: partialText(result.missed), sent: true } : { ok: true, text: t('sent'), sent: true }
 }
 
@@ -829,25 +824,20 @@ async function select($: EngineInterface, conv: string) {
   selected = conv
   editing = ''
   newerSkip = 0
-  olderExtra = 0
   cursor = ''
   view = 'chats'
   threadOpen = true
+  restedFor = ''
   await $.store.set('readAt', readAt)
   $.ui.invalidate('ui.render')
-  scrollToEnd($)
 }
 
-// Opens a Desktop chat at its newest message. In the terminal the chat is pinned to the pane and this changes nothing.
-const scrollToEnd = ($: EngineInterface) => { void $.ui.scroll({ to: 'end', in: PANE }).catch(() => {}) }
-
-// Desktop: puts a page of older messages into the chat frame.
-function loadOlder($: EngineInterface) {
-  olderExtra += OLDER_PAGE
-  $.ui.invalidate('ui.render')
+// Puts the pane on the chat's first row, so the header shows at the top and the composer at the bottom.
+const scrollToRest = ($: EngineInterface) => {
+  void $.ui.scroll({ to: { key: 'chat-top' }, in: PANE, block: 'start' }).catch(() => {})
 }
 
-// Moves the terminal window: a positive step goes to older messages, a negative one back toward the newest.
+// Moves the message window: a positive step goes to older messages, a negative one back toward the newest.
 function pageBy($: EngineInterface, step: number) {
   const next = Math.max(0, Math.min(newerSkip + step, hiddenAbove + newerSkip))
   if (next === newerSkip) return
@@ -863,8 +853,8 @@ async function closeThread($: EngineInterface) {
   threadOpen = false
   editing = ''
   newerSkip = 0
-  olderExtra = 0
   cursor = ''
+  restedFor = ''
   $.ui.invalidate('ui.render')
 }
 
@@ -1107,13 +1097,13 @@ export const register: Register = on => {
     return { result: (await sendText($, conv.id, text)).text }
   })
 
-  // In the terminal the chat is drawn one row taller than the pane, so the arrows and the page keys raise ui.scroll.
-  // The pane is held at the top and the scroll moves the messages instead: an arrow by one, a page key by a page.
+  // The chat is drawn taller than the pane (see restOffset), so the wheel, the arrows and the page keys raise ui.scroll.
+  // The pane is held at its rest row and the scroll moves the messages instead: a tick or an arrow by one, a page key by a page.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
     if (!chatShown || e.by === 0 || e.origin?.kind !== 'person') return next(e)
     const step = Math.min(PAGE_STEP, Math.max(1, Math.round(Math.abs(e.by))))
     pageBy($, e.by < 0 ? step : -step)
-    return next({ ...e, offset: 0 })
+    return next({ ...e, offset: restOffset })
   })
 
   // A Desktop chat row posts { open } when it is clicked anywhere.
@@ -1591,21 +1581,28 @@ export const register: Register = on => {
       .sort((a, b) => a.m.at - b.m.at || a.i - b.i)
       .map(x => x.m)
     const editTarget = thread.find(m => m.key === editing && m.mine && !m.deleted)
-    const end = graphic ? thread.length : Math.max(0, thread.length - newerSkip)
-    // Terminal: the window holds what fits between the header and the composer; rows are cells, so the count is exact.
-    const lineWidth = Math.max(10, cols - 8)
+    const end = Math.max(0, thread.length - newerSkip)
+    // The window holds what fits between the header and the composer, counted in the pane's rows, so it follows the
+    // pane's size on any screen. In the terminal rows are cells and the count is exact.
+    const lineWidth = Math.max(10, graphic ? Math.floor(cols * 0.8) - 4 : cols - 8)
     const linesOf = (text: string) => text.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / lineWidth)), 0)
     const rowsOf = (m: Msg, prev: Msg | undefined) => {
       const newDay = !prev || !sameDay(prev.at, m.at)
       const sameRun = !!prev && !newDay && !prev.system && !m.system && prev.from === m.from && m.at - prev.at < 5 * 60_000
+      // Desktop draws text taller than a row, and a bubble adds its frame, its time line and a gap.
+      if (graphic) {
+        return (newDay ? 2.5 : 0) + (m.system ? 1.2 : linesOf(textOf(m)) * 1.4 + (sameRun ? 2 : 2.8))
+          + (!m.mine && !m.system && !!group && !sameRun ? 1.2 : 0)
+      }
       // An incoming message's quote bar adds a blank row above and below it.
       return (newDay ? 1 : 0) + (m.system || sameRun ? 0 : 1) + linesOf(textOf(m)) + (m.system || m.mine ? 0 : 2)
     }
     const chipRows = Math.ceil(convs.reduce((n, c) => n + c.title.length + 6, 0) / cols)
-    const room = Math.max(4, (fullHeight ?? 24) - 11 - chipRows)
-    let start = graphic ? Math.max(0, end - DESKTOP_WINDOW - olderExtra) : end
+    // Desktop overfills a little: the list hangs from the bottom and clips at the top, which is better than a gap.
+    const room = graphic ? Math.max(6, (fullHeight ?? 40) - 16) * 1.2 : Math.max(4, (fullHeight ?? 24) - 11 - chipRows)
+    let start = end
     let used = 0
-    while (!graphic && start > 0) {
+    while (start > 0) {
       const rowsNeeded = rowsOf(thread[start - 1]!, thread[start - 2])
       if (used + rowsNeeded > room && start < end) break
       used += rowsNeeded
@@ -1616,15 +1613,17 @@ export const register: Register = on => {
     const below = thread.length - end
     // At the start of the chat the messages hang from the top, so going back never opens a gap above them.
     const align = start === 0 && newerSkip > 0 ? 'flex-start' : 'flex-end'
-    chatShown = view === 'chats' && !graphic
+    chatShown = view === 'chats' && !!fullHeight
+    restOffset = graphic ? 1 : 0
     const olderButton = start > 0 && (
       <Box justifyContent="center">
         <Button key="older" label={t('olderMessages', { count: start })} plain dimColor hotkey={graphic ? undefined : 'o'}
-          onPress={() => (graphic ? loadOlder($) : pageBy($, PAGE_STEP))} />
+          onPress={() => pageBy($, PAGE_STEP)} />
       </Box>
     )
-    // Terminal: the pane is held at offset 0, so this row is never seen; it only lets the arrows and page keys raise ui.scroll.
-    const scrollRow = fullHeight && !graphic ? <Box key="scroll-row" height={1} /> : null
+    // The pane rests with these rows out of view; they only give the wheel and the scroll keys room to raise ui.scroll.
+    const scrollRow = fullHeight ? <Box key="scroll-row" height={1} /> : null
+    const scrollRowTop = fullHeight && graphic ? <Box key="scroll-row-top" height={1} /> : null
     const newerButton = below > 0 && (
       <Box justifyContent="center">
         <Button key="newer" label={t('newerMessages', { count: below })} plain dimColor onPress={() => pageBy($, -PAGE_STEP)} />
@@ -1767,100 +1766,6 @@ export const register: Register = on => {
               }
             }} />
 
-    if (graphic) {
-      // Desktop: the messages sit in a frame that scrolls itself (see chat-frame.ts); the header above it and the
-      // composer below it stay where they are.
-      const frameWindow = thread.slice(-Math.min(thread.length, DESKTOP_WINDOW + olderExtra))
-      const frameMsgs: FrameMessage[] = []
-      let budget = FRAME_BUDGET
-      for (let i = frameWindow.length - 1; i >= 0; i--) {
-        const m = frameWindow[i]!
-        const prev = frameWindow[i - 1]
-        const newDay = !prev || !sameDay(prev.at, m.at)
-        const sameRun = !!prev && !newDay && !prev.system && !m.system && prev.from === m.from && m.at - prev.at < 5 * 60_000
-        const text = textOf(m)
-        budget -= text.length * 2 + 300
-        if (budget < 0 && frameMsgs.length) break
-        frameMsgs.unshift({
-          key: m.key, text, name: nameOf(m.from, m.name), time: clock(m.at), mine: m.mine, system: !!m.system,
-          deleted: !!m.deleted, edited: !!m.edited, forwarded: !m.mine && !!m.forwarded,
-          day: newDay ? dayLabel(m.at, now) : '', showName: !m.mine && !!group && !sameRun && !m.system,
-          color: colorOf(m.from), marked: m.key === cursor,
-        })
-      }
-      const frameHidden = thread.length - frameMsgs.length
-      const framePx = Math.max(200, Math.round((fullHeight ?? 40) * ROW_PX) - FRAME_CHROME_PX)
-
-      // The measurements the frame size is tuned from: the pane's size in Desktop's rows and columns, nothing else.
-      const diag = JSON.stringify({ surface: e.surface, bodyColumns: e.props.bodyColumns, bodyRows: fullHeight, viewport: e.viewport, framePx })
-      if (diag !== diagWritten) {
-        diagWritten = diag
-        void $.env.get('HOME').then(home => (home ? $.fs.write(home + '/.claude/buddy-chat/diag.json', diag) : undefined)).catch(() => {})
-      }
-
-      // k and j mark a message; with no mark the bar acts on the newest one.
-      const markable = thread.filter(m => !m.system && !m.deleted)
-      const target = markable.find(m => m.key === cursor) ?? markable[markable.length - 1]
-      const markStep = (step: 1 | -1) => {
-        const at = cursor ? markable.findIndex(m => m.key === cursor) : markable.length
-        const to = at + step
-        if (to < 0) return
-        cursor = to >= markable.length ? '' : markable[to]?.key ?? ''
-        redraw()
-      }
-
-      const actionBar = target && (
-        <Box flexDirection="row" columnGap={1} alignItems="center">
-          <Button key="nav-up" label="↑" plain dimColor hotkey="k" onPress={() => markStep(-1)} />
-          <Button key="nav-down" label="↓" plain dimColor hotkey="j" onPress={() => markStep(1)} />
-          <Box flexGrow={1} flexShrink={1}>
-            <Text dimColor={!cursor} color={cursor ? ACCENT : undefined} size="caption" wrap="truncate-end">
-              {nameOf(target.from, target.name) + ': ' + textOf(target)}
-            </Text>
-          </Box>
-          {msgActions(target)}
-        </Box>
-      )
-
-      return (
-        <Box key="thread" flexDirection="column" height={fullHeight} overflow="hidden" rowGap={1}>
-          <Box flexDirection="row" columnGap={1} alignItems="center">
-            <Button key="back" label="←" plain hotkey="b" onPress={() => closeThread($)} />
-            {avatar('head-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 40)}
-            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-              <Text size="heading" weight="semibold" wrap="truncate-end">{(current.isGroup ? '# ' : '') + current.title}</Text>
-              <Text dimColor size="caption" wrap="truncate-end">{'🔒 ' + securityLine}</Text>
-            </Box>
-            {statusView}
-          </Box>
-          {frameHidden > 0 && (
-            <Box justifyContent="center">
-              <Button key="older" label={t('olderMessages', { count: frameHidden })} plain dimColor onPress={() => loadOlder($)} />
-            </Box>
-          )}
-          {thread.length === 0
-            ? (
-              <Box flexDirection="column" alignItems="center" justifyContent="center" rowGap={1} flexGrow={1}>
-                {avatar('empty-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 72)}
-                <Text size="title" weight="semibold">{(current.isGroup ? '# ' : '') + current.title}</Text>
-                <Text dimColor size="caption">{'🔒 ' + securityLine}</Text>
-                <Text dimColor>{t('sayHi')}</Text>
-              </Box>
-            )
-            : Svg
-              ? (
-                <Box key="chat-frame" flexGrow={1} flexShrink={1} overflow="hidden">
-                  <Svg alt={t('chatFrameAlt', { title: current.title })} isInteractive height={framePx}
-                    source={chatFrame(frameMsgs, { deleted: t('deletedMsg'), edited: t('editedShort'), forwarded: t('forwarded') })} />
-                </Box>
-              )
-              : <Box flexDirection="column" flexGrow={1}>{rowsView}</Box>}
-          {actionBar}
-          <Box flexDirection="column" alignItems="stretch" width="100%" flexShrink={0}>{composer}</Box>
-        </Box>
-      )
-    }
-
     // k walks up from the newest message, j walks back down; past the newest the mark clears and the window follows new messages again.
     const moveCursor = (step: 1 | -1) => {
       const marks = thread.filter(m => !m.system)
@@ -1878,10 +1783,69 @@ export const register: Register = on => {
       redraw()
     }
 
+    if (graphic) {
+      // The bar previews the marked message, or the newest one; the marked bubble's buttons take e, x and f.
+      const target = (cursor ? thread.find(m => m.key === cursor) : undefined)
+        ?? [...thread].reverse().find(m => !m.system && !m.deleted)
+      const actionBar = target && (
+        <Box flexDirection="row" columnGap={1} alignItems="center">
+          <Button key="nav-up" label="↑" plain dimColor hotkey="k" onPress={() => moveCursor(-1)} />
+          <Button key="nav-down" label="↓" plain dimColor hotkey="j" onPress={() => moveCursor(1)} />
+          <Box flexGrow={1} flexShrink={1}>
+            <Text dimColor={!cursor} color={cursor ? ACCENT : undefined} size="caption" wrap="truncate-end">
+              {nameOf(target.from, target.name) + ': ' + textOf(target)}
+            </Text>
+          </Box>
+        </Box>
+      )
+
+      if (fullHeight && restedFor !== current.id) {
+        restedFor = current.id
+        // After this drawing lands, so the key is there to scroll to.
+        void $.clock.sleep(50).then(() => scrollToRest($)).catch(() => {})
+      }
+
+      return (
+        <Box flexDirection="column">
+          {scrollRowTop}
+          <Box key="chat-top" flexDirection="column" height={fullHeight} overflow="hidden" rowGap={1}>
+            <Box flexDirection="row" columnGap={1} alignItems="center" flexShrink={0}>
+              <Button key="back" label="←" plain hotkey="b" onPress={() => closeThread($)} />
+              {avatar('head-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 40)}
+              <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+                <Text size="heading" weight="semibold" wrap="truncate-end">{(current.isGroup ? '# ' : '') + current.title}</Text>
+                <Text dimColor size="caption" wrap="truncate-end">{'🔒 ' + securityLine}</Text>
+              </Box>
+              {statusView}
+            </Box>
+            {olderButton}
+            {thread.length === 0
+              ? (
+                <Box flexDirection="column" alignItems="center" justifyContent="center" rowGap={1} flexGrow={1}>
+                  {avatar('empty-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 72)}
+                  <Text size="title" weight="semibold">{(current.isGroup ? '# ' : '') + current.title}</Text>
+                  <Text dimColor size="caption">{'🔒 ' + securityLine}</Text>
+                  <Text dimColor>{t('sayHi')}</Text>
+                </Box>
+              )
+              : (
+                <Box key="messages" flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} justifyContent={align} overflow="hidden">
+                  {rowsView}
+                </Box>
+              )}
+            {newerButton}
+            {actionBar}
+            <Box flexDirection="column" alignItems="stretch" width="100%" flexShrink={0}>{composer}</Box>
+          </Box>
+          {scrollRow}
+        </Box>
+      )
+    }
+
     const rule = <Text dimColor>{'─'.repeat(cols)}</Text>
     return (
       <Box flexDirection="column">
-      <Box flexDirection="column" height={fullHeight} overflow="hidden">
+      <Box key="chat-top" flexDirection="column" height={fullHeight} overflow="hidden">
         {header}
         <Box flexDirection="row" columnGap={2} flexWrap="wrap" marginTop={1}>
           {convs.map((c, i) => (
