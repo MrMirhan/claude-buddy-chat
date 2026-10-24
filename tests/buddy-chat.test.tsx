@@ -178,7 +178,8 @@ test('edit and delete: only the author can change a message, both directions', a
 
   const ui = await $.ui.mount(pane('desktop'))
   await ui.press({ key: 'conv-dm:' + idOf(ahmet) })
-  expect((await ui.find({ type: 'Text', text: /son hali/ }))?.text).toContain('(düzenlendi)')
+  expect(await ui.find({ type: 'Text', text: /son hali/ })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /düzenlendi/ })).not.toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /veli bozdu/ })).toBeUndefined()
 
   w.feed.push(envelope(ahmet, me, { t: 'delete', id: 'x1', ref: 'm1' }))
@@ -441,12 +442,12 @@ test('mobile draws without text fields instead of being refused', async ($, on) 
   setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
   await start($)
   const ui = await $.ui.mount({ ...pane('desktop'), surface: 'mobile' } as never)
-  expect(await ui.find({ key: 'tab-chats' })).not.toBeUndefined()
+  expect(['list', await ui.find({ key: 'tab-people' })]).toEqual(['list', expect.anything()])
   await ui.press({ key: 'conv-dm:' + idOf(ahmet) })
-  expect(await ui.find({ type: 'Text', text: /buddy-send/ })).not.toBeUndefined()
+  expect(['thread', await ui.find({ type: 'Text', text: /buddy-send/ })]).toEqual(['thread', expect.anything()])
   await ui.press({ key: 'back' })
   await ui.press({ key: 'tab-people' })
-  expect(await ui.find({ type: 'Text', text: /buddy-add/ })).not.toBeUndefined()
+  expect(['people', await ui.find({ type: 'Text', text: /buddy-add/ })]).toEqual(['people', expect.anything()])
   await ui.unmount()
 })
 
@@ -501,4 +502,25 @@ test('onboarding: name form until a name is saved, then a summary with Edit; ste
   expect(await ui.find({ key: 'username' })).toBeUndefined()
   await ui.unmount()
   expect(w.posts.length).toBe(0)
+})
+
+test('a wide desktop pane shows the chat list and the open chat side by side', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const veli = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet'), friend(veli, 'Veli')] })
+  const me = await start($)
+  w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'w1', name: 'A', text: 'geniş ekran mesajı' }))
+  await w.clock.advance(8000)
+
+  const wide = { ...pane('desktop'), props: { ...pane('desktop').props, bodyColumns: 140 } }
+  const ui = await $.ui.mount(wide)
+  expect(await ui.find({ key: 'conv-dm:' + idOf(veli) })).not.toBeUndefined()
+  expect(await ui.find({ key: 'compose-dm:' + idOf(ahmet) })).not.toBeUndefined()
+  expect(await ui.find({ key: 'back' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^geniş ekran mesajı$/ })).not.toBeUndefined()
+
+  await ui.press({ key: 'conv-dm:' + idOf(veli) })
+  expect(await ui.find({ key: 'compose-dm:' + idOf(veli) })).not.toBeUndefined()
+  expect(await ui.find({ key: 'conv-dm:' + idOf(ahmet) })).not.toBeUndefined()
+  await ui.unmount()
 })

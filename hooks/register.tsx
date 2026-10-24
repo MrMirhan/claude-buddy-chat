@@ -89,6 +89,7 @@ let selected = ''
 let renaming = ''
 let threadOpen = false
 let editingProfile = false
+let filter = ''
 let lineCopied = false
 let editing = ''
 let session = ''
@@ -840,6 +841,14 @@ async function loadIdentity($: EngineInterface) {
 const addLine = () => '/buddy-add ' + me
 
 const ME_COLOR = '#d97757'
+// Desktop chat colours: Claude's orange for your own bubbles, and translucent greys that read on light and dark themes.
+const ACCENT = '#d97757'
+const MINE_SOFT = '#ffffffc0'
+const BUBBLE_BG = '#8e8e9326'
+const HOVER_BG = '#8e8e931a'
+const SELECTED_BG = '#d977572e'
+// Panes at least this many columns wide show the chat list beside the open chat.
+const SPLIT_COLUMNS = 90
 const PALETTE = ['#e8590c', '#2f9e44', '#1c7ed6', '#ae3ec9', '#f08c00', '#0c8599', '#d6336c', '#5c7cfa']
 
 function colorOf(id: string): string {
@@ -1193,9 +1202,20 @@ export const register: Register = on => {
     )
 
     if (view === 'people') {
+      const peopleHeader = graphic
+        ? (
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+            <Box flexDirection="row" columnGap={1} alignItems="center">
+              <Button key="tab-chats" label={'← ' + t('tabChats')} plain hotkey="s" onPress={() => { view = 'chats'; redraw() }} />
+              <Text size="title" weight="bold">{t('tabPeople')}</Text>
+            </Box>
+            {statusView}
+          </Box>
+        )
+        : header
       return (
         <Box flexDirection="column" rowGap={1}>
-          {header}
+          {peopleHeader}
           {card('me-card', profileBlock, shareRow, 'claude')}
           {card('add-card', <Text weight="semibold">{t('addContactLabel')}</Text>, addInput)}
 
@@ -1357,40 +1377,68 @@ export const register: Register = on => {
     const previewOf = (m: Msg | undefined) =>
       !m ? t('noMessagesPreview') : m.deleted ? t('deletedMsg') : m.system ? textOf(m) : (m.mine ? t('youPrefix') : '') + m.text
 
-    // On Desktop the chat list is a screen of its own; in the terminal the chats sit as chips above the thread.
-    if (graphic && !threadOpen) {
+    // Desktop: a wide pane splits into the chat list and the open chat, as chat apps do; a narrow one shows one at a time.
+    const split = graphic && cols >= SPLIT_COLUMNS
+    const needle = filter.trim().toLowerCase()
+    const listed = needle ? convs.filter(c => c.title.toLowerCase().includes(needle)) : convs
+
+    const unreadPill = (n: number) => (
+      <Box backgroundColor={ACCENT} borderStyle="round" borderColor={ACCENT} paddingX={1}>
+        <Text size="caption" weight="bold" color="#ffffff">{n > 99 ? '99+' : String(n)}</Text>
+      </Box>
+    )
+
+    const chatRow = (c: Conv, i: number) => {
+      const last = lastOf(c.id)
+      const active = (split || threadOpen) && c.id === current?.id
       return (
-        <Box flexDirection="column" rowGap={1}>
-          {header}
-          {incoming.length > 0 && (
-            <Button key="go-requests" label={t('requestsButton', { count: incoming.length })} variant="primary"
-              onPress={() => { view = 'people'; redraw() }} />
-          )}
-          <Box flexDirection="column" rowGap={1}>
-            {convs.map((c, i) => {
-              const last = lastOf(c.id)
-              return (
-                <Box key={'row-' + c.id} flexDirection="row" columnGap={1} alignItems="center">
-                  {avatar(c.id, c.isGroup ? '#' : c.title, convColor(c), 36)}
-                  <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-                    <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
-                      <Button key={'conv-' + c.id} plain hotkey={i < 9 ? String(i + 1) : undefined} onPress={() => select($, c.id)}>
-                        <Text weight="semibold">{(c.isGroup ? '# ' : '') + c.title}</Text>
-                      </Button>
-                      <Text dimColor size="caption">{last ? shortWhen(last.at, now) : ''}</Text>
-                    </Box>
-                    <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
-                      <Text dimColor size="footnote" wrap="truncate-end">{previewOf(last)}</Text>
-                      {c.unread > 0 && <Text color="warning" weight="bold" size="caption">● {c.unread}</Text>}
-                    </Box>
-                  </Box>
-                </Box>
-              )
-            })}
+        <Box key={'row-' + c.id} flexDirection="row" columnGap={1} alignItems="center" padding="sm"
+          backgroundColor={active ? SELECTED_BG : undefined} hover={{ backgroundColor: active ? SELECTED_BG : HOVER_BG }}>
+          {avatar(c.id, c.isGroup ? '#' : c.title, convColor(c), 40)}
+          <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+            <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
+              <Button key={'conv-' + c.id} plain hotkey={i < 9 ? String(i + 1) : undefined} onPress={() => select($, c.id)}>
+                <Text weight="semibold">{(c.isGroup ? '# ' : '') + c.title}</Text>
+              </Button>
+              <Text dimColor={c.unread === 0} color={c.unread > 0 ? ACCENT : undefined} size="caption">{last ? shortWhen(last.at, now) : ''}</Text>
+            </Box>
+            <Box flexDirection="row" justifyContent="space-between" columnGap={1} alignItems="center">
+              <Text dimColor={c.unread === 0} size="footnote" wrap="truncate-end">{previewOf(last)}</Text>
+              {c.unread > 0 && unreadPill(c.unread)}
+            </Box>
           </Box>
         </Box>
       )
     }
+
+    const sidebar = (
+      <Box key="sidebar" flexDirection="column" width={split ? '36%' : undefined} flexShrink={0} rowGap={1}>
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+          <Text size="title" weight="bold">{t('tabChats')}</Text>
+          {statusView}
+        </Box>
+        {Input && convs.length > 5 && (
+          <Input key="search" placeholder={t('searchPlaceholder')} value={filter} submitLabel={t('searchPlaceholder')}
+            onInput={(value: string) => { filter = value; redraw() }}
+            onSubmit={(value: string) => { filter = value; redraw() }} />
+        )}
+        {incoming.length > 0 && (
+          <Button key="go-requests" label={t('requestsButton', { count: incoming.length })} variant="primary"
+            onPress={() => { view = 'people'; redraw() }} />
+        )}
+        <Box flexDirection="column">{listed.map(chatRow)}</Box>
+        {listed.length === 0 && <Text dimColor>{t('noMatches')}</Text>}
+        <Box flexDirection="row" columnGap={1} alignItems="center" marginTop={1}>
+          {avatar('me-mini', profile.displayName || profile.username || '?', ME_COLOR, 28)}
+          <Box flexGrow={1} flexShrink={1}>
+            <Text weight="semibold" wrap="truncate-end">{myPublicName()}</Text>
+          </Box>
+          {tab('tab-people', t('tabPeople'), 'k', false, () => { view = 'people'; redraw() }, incoming.length)}
+        </Box>
+      </Box>
+    )
+
+    if (graphic && !split && !threadOpen) return sidebar
 
     const group = current.isGroup ? groups.find(g => groupConv(g.id) === current.id) : undefined
     const peer = current.isGroup ? undefined : contactOf(current.id.slice(3))
@@ -1465,20 +1513,30 @@ export const register: Register = on => {
       const name = nameOf(m.from, m.name)
 
       if (graphic) {
-        // Desktop: a framed bubble; in groups, other people's messages carry an avatar and a name.
+        // Desktop: chat bubbles; actions show on hover; in groups other people's messages carry an avatar and a name.
+        const showFace = !m.mine && !!group
         return (
-          <Box key={'msg-' + m.key} flexDirection="column" alignItems={m.mine ? 'flex-end' : 'flex-start'}>
+          <Box key={'msg-' + m.key} flexDirection="column" alignItems={m.mine ? 'flex-end' : 'flex-start'} marginTop={sameRun ? 0 : 1}>
             {day}
-            <Box flexDirection="row" columnGap={1} alignItems="flex-start">
-              {!m.mine && group && (sameRun ? <Box width={28} /> : avatar('msg-' + m.key, name, color, 28))}
-              <Box flexDirection="column" borderStyle="round" borderColor={m.mine ? 'suggestion' : color} paddingX={1}>
-                {!m.mine && group && !sameRun && <Text weight="semibold" color={color} size="caption">{name}</Text>}
-                {body(m)}
-                <Box flexDirection="row" justifyContent="flex-end" columnGap={1} alignItems="center">
-                  <Text dimColor size="caption">{clock(m.at)}</Text>
-                  {msgActions(m)}
+            {showFace && !sameRun && (
+              <Box paddingLeft={5}><Text size="caption" weight="semibold" color={color}>{name}</Text></Box>
+            )}
+            <Box key={'msgrow-' + m.key} flexDirection={m.mine ? 'row-reverse' : 'row'} columnGap={1} alignItems="flex-end" width="80%"
+              justifyContent="flex-start">
+              {showFace && (sameRun ? <Box width={32} /> : avatar('msg-' + m.key, name, color, 32))}
+              <Box flexDirection="column" flexShrink={1} backgroundColor={m.mine ? ACCENT : BUBBLE_BG}
+                borderStyle="round" borderColor={m.mine ? ACCENT : BUBBLE_BG} paddingX={1}>
+                {m.deleted
+                  ? <Text italic color={m.mine ? MINE_SOFT : undefined} dimColor={!m.mine}>{t('deletedMsg')}</Text>
+                  : <Text wrap="wrap" color={m.mine ? '#ffffff' : undefined}>{m.text}</Text>}
+                <Box flexDirection="row" justifyContent="flex-end">
+                  <Text size="caption" color={m.mine ? MINE_SOFT : undefined} dimColor={!m.mine}>
+                    {(m.edited ? t('editedShort') + ' · ' : '') + clock(m.at)}
+                  </Text>
                 </Box>
               </Box>
+              <Box display="none" hover={{ display: 'flex' }} flexDirection="row" columnGap={1}>{msgActions(m)}</Box>
+              {!m.mine && m.forwarded && <Text dimColor size="caption">{t('forwarded')}</Text>}
             </Box>
           </Box>
         )
@@ -1526,21 +1584,35 @@ export const register: Register = on => {
             }} />
 
     if (graphic) {
-      return (
-        <Box flexDirection="column" rowGap={1}>
-          <Box flexDirection="row" columnGap={1} alignItems="center">
-            <Button key="back" label="←" plain hotkey="b" onPress={() => { threadOpen = false; editing = ''; redraw() }} />
-            {avatar('head-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 32)}
+      const threadPane = (
+        <Box key="thread" flexDirection="column" flexGrow={1} flexShrink={1} paddingLeft={split ? 2 : 0}>
+          <Box flexDirection="row" columnGap={1} alignItems="center" paddingBottom={1}>
+            {!split && <Button key="back" label="←" plain hotkey="b" onPress={() => { threadOpen = false; editing = ''; redraw() }} />}
+            {avatar('head-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 40)}
             <Box flexDirection="column" flexGrow={1} flexShrink={1}>
               <Text size="heading" weight="semibold" wrap="truncate-end">{(current.isGroup ? '# ' : '') + current.title}</Text>
-              <Text dimColor size="caption" wrap="truncate-end">{securityLine}</Text>
+              <Text dimColor size="caption" wrap="truncate-end">{'🔒 ' + securityLine}</Text>
             </Box>
-            {statusView}
+            {!split && statusView}
           </Box>
           {hidden > 0 && <Box justifyContent="center"><Text dimColor size="caption">{t('olderMessages', { count: hidden })}</Text></Box>}
-          {thread.length === 0 && <Box justifyContent="center" marginY={2}><Text dimColor>{t('emptyThread')}</Text></Box>}
-          <Box flexDirection="column" rowGap={1}>{rowsView}</Box>
-          {composer}
+          {thread.length === 0 && (
+            <Box flexDirection="column" alignItems="center" rowGap={1} marginY={3}>
+              {avatar('empty-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 72)}
+              <Text size="title" weight="semibold">{(current.isGroup ? '# ' : '') + current.title}</Text>
+              <Text dimColor size="caption">{'🔒 ' + securityLine}</Text>
+              <Text dimColor>{t('sayHi')}</Text>
+            </Box>
+          )}
+          <Box flexDirection="column">{rowsView}</Box>
+          <Box marginTop={1}>{composer}</Box>
+        </Box>
+      )
+      if (!split) return threadPane
+      return (
+        <Box flexDirection="row" columnGap={1}>
+          {sidebar}
+          {threadPane}
         </Box>
       )
     }

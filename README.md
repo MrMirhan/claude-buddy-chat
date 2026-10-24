@@ -58,8 +58,9 @@ The pane is the same on every surface. Each app draws it in its own style.
 
 **Desktop app and VS Code extension**
 
-- The chat list shows a colored avatar, the last message, the time and the number of unread messages. Select a chat to open it.
-- In a chat, the top bar shows a back button (`b`), the avatar, the name and the encryption status. Messages show in framed bubbles.
+- A wide pane shows the chat list and the open chat side by side. A narrow pane shows the list, and you select a chat to open it.
+- The chat list shows a colored avatar, the last message, the time and the number of unread messages. With more than 5 chats, a search field filters the list.
+- Your messages show in orange bubbles on the right. Incoming messages show in grey bubbles on the left. Move the pointer over a message to show its actions.
 - The **People** tab shows your profile card, requests, friends, groups and blocked people.
 
 **Terminal**

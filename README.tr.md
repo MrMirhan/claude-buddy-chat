@@ -58,8 +58,9 @@ Panel her yüzeyde aynı, ama her uygulama kendi görünümüyle çizer.
 
 **Desktop ve VS Code**
 
-- Sohbet listesinde renkli avatar, son mesaj, saat ve okunmamış sayısı görünür. Sohbete tıklayınca açılır.
-- Sohbetin üst çubuğunda geri butonu (`b`), avatar, ad ve şifreleme durumu var. Mesajlar çerçeveli balonlarda.
+- Geniş panelde sohbet listesi ve açık sohbet yan yana durur. Dar panelde önce liste görünür, sohbete tıklayınca açılır.
+- Sohbet listesinde renkli avatar, son mesaj, saat ve okunmamış sayısı görünür. 5'ten fazla sohbet varsa bir arama alanı listeyi süzer.
+- Senin mesajların sağda turuncu balonlarda, gelenler solda gri balonlarda. Mesajın işlemleri, üzerine gelince görünür.
 - **Kişiler** sekmesinde profil kartın, istekler, arkadaşlar, gruplar ve engellenenler var.
 
 **Terminal**
