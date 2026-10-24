@@ -1967,8 +1967,10 @@ export const register: Register = on => {
                   {ticks(m)}
                 </Box>
               </Box>
-              <Box display="none" hover={{ display: 'flex' }} flexDirection="row" columnGap={1}>{msgActions(m)}</Box>
-              {!m.mine && m.forwarded && <Text dimColor size="caption">{t('forwarded')}</Text>}
+            </Box>
+            {/* Under the bubble, on its side, shown while the pointer is over the message. */}
+            <Box display="none" hover={{ display: 'flex' }} flexDirection="row" columnGap={1} paddingLeft={showFace ? 5 : 1} paddingRight={1}>
+              {msgActions(m)}
             </Box>
           </Box>
         )
