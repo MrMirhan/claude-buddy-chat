@@ -2438,8 +2438,8 @@ export const register: Register = on => {
   // The chat is drawn taller than the pane (see restOffset), so the wheel, the arrows and the page keys raise ui.scroll.
   // The pane is held at its rest row and the scroll moves the messages instead: a tick or an arrow by one, a page key by a page.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
-    // A move to the very top would leave the wheel no room to go up; the rest row is as high as the chat goes.
-    if (chatShown && restOffset && e.origin?.kind === 'plugin' && e.offset < restOffset) return next({ ...e, offset: restOffset })
+    // Every move this plugin asks for while a chat shows ends on the rest row, where the wheel has room both ways.
+    if (chatShown && restOffset && e.origin?.kind === 'plugin') return next({ ...e, offset: restOffset })
     if (!chatShown || e.by === 0 || e.origin?.kind !== 'person') return next(e)
     if (restOffset === 0) {
       const step = Math.min(PAGE_STEP, Math.max(1, Math.round(Math.abs(e.by))))
@@ -3095,7 +3095,7 @@ export const register: Register = on => {
     }
     const chipRows = Math.ceil(convs.reduce((n, c) => n + c.title.length + 6, 0) / cols)
     // Desktop overfills a little: the list hangs from the bottom and clips at the top, which is better than a gap.
-    const room = graphic ? Math.max(6, (fullHeight ?? 40) - 16) * 1.2 : Math.max(4, (fullHeight ?? 24) - 11 - chipRows)
+    const room = graphic ? Math.max(6, (fullHeight ?? 40) - 14) * 1.2 : Math.max(4, (fullHeight ?? 24) - 11 - chipRows)
     let start = end
     let used = 0
     while (start > 0) {
@@ -3373,28 +3373,17 @@ export const register: Register = on => {
     }
 
     if (graphic) {
-      // The bar previews the marked message, or the newest one; the marked bubble's buttons take e, x and f.
-      const target = (cursor ? thread.find(m => m.key === cursor) : undefined)
-        ?? [...thread].reverse().find(m => !m.system && !m.deleted)
-      const actionBar = target && (
-        <Box flexDirection="row" columnGap={1} alignItems="center">
-          <Button key="nav-up" label="↑" plain dimColor hotkey="k" onPress={() => moveCursor(-1)} />
-          <Button key="nav-down" label="↓" plain dimColor hotkey="j" onPress={() => moveCursor(1)} />
-          <Box flexGrow={1} flexShrink={1}>
-            <Text dimColor={!cursor} color={cursor ? ACCENT : undefined} size="caption" wrap="truncate-end">
-              {nameOf(target.from, target.name) + ': ' + textOf(target)}
-            </Text>
-          </Box>
-        </Box>
-      )
-
       // At the top the wheel cannot go up and raises nothing, so the pane goes back to its rest row whenever a
       // drawing finds it elsewhere: a chat just opened, the pane shown again, a resize. A few tries per chat at most.
       if (restedFor !== current.id) {
         restedFor = current.id
         restTries = 0
         // Desktop may not have laid the chat out yet when the first try goes, so a few more follow.
-        if (fullHeight && e.surface === 'desktop') for (const ms of [300, 800, 1500]) $.clock.after(ms, () => scrollToRest($))
+        // Desktop may skip a move to a key; a move to the end it makes, and from the end the wheel can go up at once.
+        if (fullHeight && e.surface === 'desktop') {
+          $.clock.after(60, () => { void $.ui.scroll({ to: 'end', in: PANE }).catch(() => {}) })
+          for (const ms of [300, 800]) $.clock.after(ms, () => scrollToRest($))
+        }
       }
       if (e.props.scroll?.offset === restOffset) restTries = 0
       if (fullHeight && e.surface === 'desktop' && e.props.scroll?.offset !== restOffset && !restQueued && restTries < 5) {
@@ -3438,7 +3427,6 @@ export const register: Register = on => {
                 </Box>
               )}
             {newerButton}
-            {actionBar}
             <Box flexDirection="row" alignItems="flex-start" columnGap={1} width="100%" flexShrink={0}>
               {attachButton}
               <Box flexDirection="column" alignItems="stretch" flexGrow={1} flexShrink={1}>{composer}</Box>
