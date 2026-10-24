@@ -82,6 +82,22 @@ async function openChat(ui: Opener, key: string) {
   }
 }
 
+// The chat frame on Desktop: the Svg inside the Box keyed chat-frame, whose source is the messages' HTML.
+async function frameSource(ui: { find: (q: never) => Promise<unknown> }): Promise<string> {
+  const box = (await ui.find({ key: 'chat-frame' } as never)) as { children?: { type?: string; props?: { source?: string } }[] } | undefined
+  return box?.children?.find(c => c.type === 'Svg')?.props?.source ?? ''
+}
+
+// Finds text on any surface: as a Text element, or on Desktop inside the chat frame's HTML.
+async function shows(ui: { find: (q: never) => Promise<unknown> }, query: { type: 'Text'; text: RegExp }) {
+  const found = (await ui.find(query as never)) as { text?: string } | undefined
+  if (found) return found
+  const source = await frameSource(ui)
+  const inner = new RegExp(query.text.source.replace(/^\^/, '>').replace(/\$$/, '<'))
+  const hit = inner.exec(source) ?? query.text.exec(source)
+  return hit ? { text: hit[0].replace(/^>|<$/g, '') } : undefined
+}
+
 // Runs a /buddy command as the user typing it in the prompt box would.
 const run = ($: Engine, command: string, args = '') =>
   $.command.run({ command, args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
@@ -121,7 +137,7 @@ test('request, accept, profile and a local nickname that never leaves this machi
   await ui.input({ key: 'nick-' + idOf(ayse), text: 'Kanka' })
   await ui.press({ key: 'tab-chats' })
   await openChat(ui, 'conv-dm:' + idOf(ayse))
-  expect((await ui.find({ type: 'Text', text: /Artık arkadaşsınız/ }))).toBeDefined()
+  expect((await shows(ui, { type: 'Text', text: /Artık arkadaşsınız/ }))).toBeDefined()
   await ui.unmount()
   expect(await list($)).toContain('Kanka · @ayilmaz · Ayşe Yılmaz')
 
@@ -145,15 +161,15 @@ test('incoming request shows in Kişiler; dm before accept is dropped, after acc
 
   const ui = await $.ui.mount(pane('terminal'))
   await ui.press({ key: 'tab-people' })
-  expect(await ui.find({ type: 'Text', text: /Arkadaşlık istekleri/ })).toBeDefined()
+  expect(await shows(ui, { type: 'Text', text: /Arkadaşlık istekleri/ })).toBeDefined()
   await ui.press({ key: 'req-accept-' + idOf(ayse) })
   expect(opened(sent(w, ayse)[0], ayse)?.t).toBe('accept')
 
   w.feed.push(envelope(ayse, me, { t: 'dm', id: 'd1', name: 'Ayşe', text: 'artik geliyor' }))
   await w.clock.advance(8000)
   await ui.redraw()
-  expect((await ui.find({ type: 'Text', text: /artik geliyor/ }))?.text).toContain('artik geliyor')
-  expect(await ui.find({ type: 'Text', text: /erken mesaj/ })).toBeUndefined()
+  expect((await shows(ui, { type: 'Text', text: /artik geliyor/ }))?.text).toContain('artik geliyor')
+  expect(await shows(ui, { type: 'Text', text: /erken mesaj/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -174,8 +190,8 @@ test('dm is end-to-end encrypted, forged and stranger messages are dropped, os n
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount(pane(surface))
     await openChat(ui, 'conv-dm:' + idOf(ahmet))
-    expect((await ui.find({ type: 'Text', text: /gercek mesaj/ }))).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /sahte|yabanci/ })).toBeUndefined()
+    expect((await shows(ui, { type: 'Text', text: /gercek mesaj/ }))).toBeDefined()
+    expect(await shows(ui, { type: 'Text', text: /sahte|yabanci/ })).toBeUndefined()
     await ui.unmount()
   }
 
@@ -199,14 +215,14 @@ test('edit and delete: only the author can change a message, both directions', a
 
   const ui = await $.ui.mount(pane('desktop'))
   await openChat(ui, 'conv-dm:' + idOf(ahmet))
-  expect(await ui.find({ type: 'Text', text: /son hali/ })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /düzenlendi/ })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /veli bozdu/ })).toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /son hali/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /düzenlendi/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /veli bozdu/ })).toBeUndefined()
 
   w.feed.push(envelope(ahmet, me, { t: 'delete', id: 'x1', ref: 'm1' }))
   await w.clock.advance(8000)
   await ui.redraw()
-  expect(await ui.find({ type: 'Text', text: /Bu mesaj silindi/ })).toBeDefined()
+  expect(await shows(ui, { type: 'Text', text: /Bu mesaj silindi/ })).toBeDefined()
 
   await ui.input({ key: 'compose-dm:' + idOf(ahmet), text: 'yazim hatsı' })
   const mine = opened(sent(w, ahmet)[0], ahmet)
@@ -214,7 +230,7 @@ test('edit and delete: only the author can change a message, both directions', a
   await ui.input({ key: 'editing-' + mine.id, text: 'yazım hatası' })
   const edit = opened(sent(w, ahmet)[1], ahmet)
   expect(edit).toMatchObject({ t: 'edit', ref: mine.id, text: 'yazım hatası' })
-  expect((await ui.find({ type: 'Text', text: /yazım hatası/ }))).toBeDefined()
+  expect((await shows(ui, { type: 'Text', text: /yazım hatası/ }))).toBeDefined()
 
   w.answer.value = 'Sil'
   await ui.press({ key: 'del-' + mine.id })
@@ -233,7 +249,7 @@ test('block is silent and drops everything; unfriend notifies the other side', a
   await ui.press({ key: 'tab-people' })
   await ui.press({ key: 'friend-block-' + idOf(spam) })
   expect(sent(w, spam).length).toBe(0)
-  expect(await ui.find({ type: 'Text', text: /Engellenenler \(?1/ })).toBeDefined()
+  expect(await shows(ui, { type: 'Text', text: /Engellenenler \(?1/ })).toBeDefined()
 
   w.answer.value = 'Çıkar'
   await ui.press({ key: 'friend-remove-' + idOf(ali) })
@@ -281,7 +297,7 @@ test('group: invite from a friend, message from a non-friend member, send fans o
 
   const ui = await $.ui.mount(pane('terminal'))
   await openChat(ui, 'conv-g:0123456789abcdef')
-  expect((await ui.find({ type: 'Text', text: /grupta selam/ }))).toBeDefined()
+  expect((await shows(ui, { type: 'Text', text: /grupta selam/ }))).toBeDefined()
   await ui.unmount()
 })
 
@@ -358,10 +374,10 @@ test('0.2 data is cleared except the name, English is the default, and the empty
   expect((await run($, 'buddy-id')).text).toContain(me)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount(pane(surface))
-    expect(['welcome', await ui.find({ type: 'Text', text: /Welcome to Buddy chat/ })]).toEqual(['welcome', expect.anything()])
+    expect(['welcome', await shows(ui, { type: 'Text', text: /Welcome to Buddy chat/ })]).toEqual(['welcome', expect.anything()])
     await ui.press({ key: 'copy-line' })
     await ui.press({ key: 'tab-people' })
-    expect(['people', await ui.find({ type: 'Text', text: /Friends/ })]).toEqual(['people', expect.anything()])
+    expect(['people', await shows(ui, { type: 'Text', text: /Friends/ })]).toEqual(['people', expect.anything()])
     await ui.press({ key: 'tab-chats' })
     await ui.unmount()
   }
@@ -422,8 +438,8 @@ for (const order of ['smaller', 'larger'] as const) {
     await w.clock.advance(8000)
     const ui = await $.ui.mount(pane('desktop'))
     await openChat(ui, 'conv-dm:' + idOf(friendKp))
-    expect(await ui.find({ type: 'Text', text: /kuantum selam/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /klasik mesaj/ })).toBeUndefined()
+    expect(await shows(ui, { type: 'Text', text: /kuantum selam/ })).toBeDefined()
+    expect(await shows(ui, { type: 'Text', text: /klasik mesaj/ })).toBeUndefined()
     await ui.unmount()
 
     await run($, 'buddy-send', 'Ahmet cevap')
@@ -447,7 +463,7 @@ test('desktop opens on the chat list with avatars and previews, terminal goes st
   expect((await desk.find({ type: 'Text', text: /liste önizlemesi/, in: 'conv-dm:' + idOf(ahmet) }))?.props?.size).toBe('footnote')
   await openChat(desk, 'conv-dm:' + idOf(ahmet))
   expect(['step2', await desk.find({ key: 'back' })]).toEqual(['step2', expect.anything()])
-  expect(['step3', await desk.find({ type: 'Text', text: /kuantuma|PQ/ })]).toEqual(['step3', expect.anything()])
+  expect(['step3', await shows(desk, { type: 'Text', text: /kuantuma|PQ/ })]).toEqual(['step3', expect.anything()])
   await desk.press({ key: 'back' })
   expect(await desk.find({ key: 'back' })).toBeUndefined()
   await desk.unmount()
@@ -455,7 +471,7 @@ test('desktop opens on the chat list with avatars and previews, terminal goes st
   const term = await $.ui.mount(pane('terminal'))
   expect(await term.find({ type: 'Svg' })).toBeUndefined()
   expect((await term.find({ key: 'tab-chats' }))?.props?.plain).toBe(true)
-  expect(['step4', await term.find({ type: 'Text', text: /liste önizlemesi/ })]).toEqual(['step4', expect.anything()])
+  expect(['step4', await shows(term, { type: 'Text', text: /liste önizlemesi/ })]).toEqual(['step4', expect.anything()])
   expect(['step5', await term.find({ key: 'compose-dm:' + idOf(ahmet) })]).toEqual(['step5', expect.anything()])
   await term.unmount()
 })
@@ -467,10 +483,10 @@ test('mobile draws without text fields instead of being refused', async ($, on) 
   const ui = await $.ui.mount({ ...pane('desktop'), surface: 'mobile' } as never)
   expect(['list', await ui.find({ key: 'tab-people' })]).toEqual(['list', expect.anything()])
   await openChat(ui, 'conv-dm:' + idOf(ahmet))
-  expect(['thread', await ui.find({ type: 'Text', text: /buddy-send/ })]).toEqual(['thread', expect.anything()])
+  expect(['thread', await shows(ui, { type: 'Text', text: /buddy-send/ })]).toEqual(['thread', expect.anything()])
   await ui.press({ key: 'back' })
   await ui.press({ key: 'tab-people' })
-  expect(['people', await ui.find({ type: 'Text', text: /buddy-add/ })]).toEqual(['people', expect.anything()])
+  expect(['people', await shows(ui, { type: 'Text', text: /buddy-add/ })]).toEqual(['people', expect.anything()])
   await ui.unmount()
 })
 
@@ -488,9 +504,9 @@ test('the language switches between English and Turkish, and system lines follow
 
   const ui = await $.ui.mount(pane('desktop'))
   await ui.press({ key: 'tab-people' })
-  expect(await ui.find({ type: 'Text', text: /Arkadaşlar/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /Arkadaşlar/ })).not.toBeUndefined()
   await ui.press({ key: 'lang-en' })
-  expect(await ui.find({ type: 'Text', text: /Friends/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /Friends/ })).not.toBeUndefined()
   await ui.unmount()
 
   await run($, 'buddy-lang', 'tr')
@@ -506,8 +522,8 @@ test('onboarding: name form until a name is saved, then a summary with Edit; ste
     const ui = await $.ui.mount(pane(surface))
     expect(await ui.find({ key: 'display-name' })).not.toBeUndefined()
     expect(await ui.find({ key: 'edit-profile' })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /X25519|ML-KEM/ })).toBeUndefined()
+    expect(await shows(ui, { type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
+    expect(await shows(ui, { type: 'Text', text: /X25519|ML-KEM/ })).toBeUndefined()
     await ui.unmount()
   }
 
@@ -515,11 +531,11 @@ test('onboarding: name form until a name is saved, then a summary with Edit; ste
   await ui.input({ key: 'display-name', text: 'Deniz Kaya' })
   expect(await ui.find({ key: 'display-name' })).toBeUndefined()
   expect(await ui.find({ key: 'edit-profile' })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^Deniz Kaya$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^Deniz Kaya$/ })).not.toBeUndefined()
 
   await ui.press({ key: 'copy-line' })
-  expect((await ui.find({ type: 'Text', text: /Share your add line/ }))).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^✓$/ })).not.toBeUndefined()
+  expect((await shows(ui, { type: 'Text', text: /Share your add line/ }))).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^✓$/ })).not.toBeUndefined()
 
   await ui.press({ key: 'edit-profile' })
   expect(await ui.find({ key: 'username' })).not.toBeUndefined()
@@ -540,12 +556,12 @@ test('a wide desktop pane: list beside home, a chat opens beside the list, sendi
   const wide = { ...pane('desktop'), props: { ...pane('desktop').props, bodyColumns: 140 } }
   const ui = await $.ui.mount(wide)
   expect(await ui.find({ key: 'conv-dm:' + idOf(ahmet) })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
   expect(await ui.find({ key: 'compose-dm:' + idOf(ahmet) })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^1$/, in: 'conv-dm:' + idOf(ahmet) })).not.toBeUndefined()
 
   await openChat(ui, 'conv-dm:' + idOf(ahmet))
-  expect(await ui.find({ type: 'Text', text: /^geniş ekran mesajı$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^geniş ekran mesajı$/ })).not.toBeUndefined()
   // An open chat takes the whole pane, so it scrolls with the wheel; the list comes back with the back button.
   expect(await ui.find({ key: 'conv-dm:' + idOf(veli) })).toBeUndefined()
   await ui.input({ key: 'compose-dm:' + idOf(ahmet), text: 'cevap' })
@@ -553,7 +569,7 @@ test('a wide desktop pane: list beside home, a chat opens beside the list, sendi
   expect(await ui.find({ key: 'compose-dm:' + idOf(ahmet) + '-1' })).not.toBeUndefined()
 
   await ui.press({ key: 'back' })
-  expect(await ui.find({ type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^Buddy ID:$/ })).not.toBeUndefined()
   expect(await ui.find({ key: 'conv-dm:' + idOf(veli) })).not.toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^1$/, in: 'conv-dm:' + idOf(ahmet) })).toBeUndefined()
   await ui.unmount()
@@ -598,8 +614,8 @@ test('terminal: a thread is in time order, holds what fits above the composer, p
   await start($)
 
   const ui = await $.ui.mount(pane('terminal'))
-  expect(await ui.find({ type: 'Text', text: /^mesaj 34$/ })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^en eski cevap$/ })).toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^mesaj 34$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^en eski cevap$/ })).toBeUndefined()
   expect(await ui.find({ key: 'compose-' + conv })).not.toBeUndefined()
   const older = await ui.find({ key: 'older' })
   const hidden = Number(/(\d+)/.exec(older?.text ?? '')?.[1])
@@ -609,15 +625,15 @@ test('terminal: a thread is in time order, holds what fits above the composer, p
   expect(await ui.find({ type: 'Text', text: new RegExp('^mesaj ' + (hidden - 2) + '$') })).toBeUndefined()
 
   await ui.press({ key: 'older' })
-  expect(await ui.find({ type: 'Text', text: /^mesaj 34$/ })).toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^mesaj 34$/ })).toBeUndefined()
   expect((await ui.find({ key: 'newer' }))?.text).toContain('8')
   await ui.press({ key: 'newer' })
-  expect(await ui.find({ type: 'Text', text: /^mesaj 34$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^mesaj 34$/ })).not.toBeUndefined()
 
   // Walking the mark up past the window's top drags the window with it.
   for (let n = 0; n < 36 - hidden + 2; n++) await ui.press({ key: 'nav-up' })
-  expect(await ui.find({ type: 'Text', text: /^mesaj 34$/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^[‹›]$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^mesaj 34$/ })).toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^[‹›]$/ })).not.toBeUndefined()
   await ui.unmount()
 })
 
@@ -633,48 +649,47 @@ test('terminal: j/k mark messages, the marked one takes e/x/f, and People moved 
   const ui = await $.ui.mount(pane('terminal'))
   expect((await ui.find({ key: 'tab-people' }))?.props?.hotkey).toBe('p')
   expect((await ui.find({ key: 'nav-up' }))?.props?.hotkey).toBe('k')
-  expect(await ui.find({ type: 'Text', text: /^[‹›]$/ })).toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^[‹›]$/ })).toBeUndefined()
 
   await ui.press({ key: 'nav-up' })
-  expect(await ui.find({ type: 'Text', text: /^‹$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^‹$/ })).not.toBeUndefined()
   expect((await ui.find({ key: 'edit-m1' }))?.props?.hotkey).toBe('e')
   expect((await ui.find({ key: 'del-m1' }))?.props?.hotkey).toBe('x')
 
   await ui.press({ key: 'nav-up' })
-  expect(await ui.find({ type: 'Text', text: /^›$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^›$/ })).not.toBeUndefined()
   expect((await ui.find({ key: 'fwd-r1' }))?.props?.hotkey).toBe('f')
   expect((await ui.find({ key: 'edit-m1' }))?.props?.hotkey).toBeUndefined()
 
   await ui.press({ key: 'nav-down' })
   await ui.press({ key: 'nav-down' })
-  expect(await ui.find({ type: 'Text', text: /^[‹›]$/ })).toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^[‹›]$/ })).toBeUndefined()
   await ui.unmount()
 })
 
-test('desktop: a chat holds its last 40 messages and loads 20 older ones at a time', async ($, on) => {
+test('desktop: the chat frame holds the newest 150 messages and loads 100 older ones at a time', async ($, on) => {
   const ahmet = nacl.box.keyPair()
   const conv = 'dm:' + idOf(ahmet)
-  const inbox = Array.from({ length: 80 }, (_, i) =>
+  const inbox = Array.from({ length: 200 }, (_, i) =>
     ({ key: 'p' + i, conv, from: idOf(ahmet), name: 'A', text: 'satır ' + i, at: (i + 1) * 1000, mine: false }))
   setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
   await start($)
   const wide = { ...pane('desktop'), props: { ...pane('desktop').props, bodyColumns: 140 } }
   const ui = await $.ui.mount(wide)
   await openChat(ui, 'conv-' + conv)
+  const box = await ui.find({ key: 'chat-frame' })
+  const frame = (box?.children as { type?: string; props?: { isInteractive?: boolean } }[] | undefined)?.find(c => c.type === 'Svg')
+  expect(frame?.props?.isInteractive).toBe(true)
+  expect(await frameSource(ui)).toContain('overflow-y: auto')
   expect(await ui.find({ key: 'compose-' + conv })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^satır 79$/ })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^satır 40$/ })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^satır 39$/ })).toBeUndefined()
-  expect((await ui.find({ key: 'older' }))?.text).toContain('40')
+  expect(await shows(ui, { type: 'Text', text: /^satır 199$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^satır 50$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^satır 49$/ })).toBeUndefined()
+  expect((await ui.find({ key: 'older' }))?.text).toContain('50')
 
   await ui.press({ key: 'older' })
-  expect(await ui.find({ type: 'Text', text: /^satır 20$/ })).not.toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^satır 19$/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^satır 79$/ })).not.toBeUndefined()
-  await ui.press({ key: 'older' })
-  expect(await ui.find({ type: 'Text', text: /^satır 0$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^satır 0$/ })).not.toBeUndefined()
   expect(await ui.find({ key: 'older' })).toBeUndefined()
-  expect(await ui.find({ key: 'newer' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -688,12 +703,35 @@ test('a wheel or arrow scroll over a chat pages its messages and holds the pane 
   setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
   await start($)
   const ui = await $.ui.mount(pane('terminal'))
-  expect(await ui.find({ type: 'Text', text: /^teker 59$/ })).not.toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^teker 59$/ })).not.toBeUndefined()
 
   await $.ui.scroll({ component: 'Pane', requestId: 'buddy-chat', offset: 0, by: -3, bodyRows: 40, contentRows: 41, origin: { kind: 'person' } } as never)
   await ui.redraw()
   expect(offsets.at(-1)).toBe(0)
-  expect(await ui.find({ type: 'Text', text: /^teker 59$/ })).toBeUndefined()
+  expect(await shows(ui, { type: 'Text', text: /^teker 59$/ })).toBeUndefined()
   expect((await ui.find({ key: 'newer' }))?.text).toContain('3')
+  await ui.unmount()
+})
+
+test('desktop frame: a buddy cannot inject markup, and long histories stay under the Svg size limit', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const conv = 'dm:' + idOf(ahmet)
+  const evil = `<img src="https://evil.example/t.png"><style>*{display:none}</style>"'&`
+  const long = 'x'.repeat(3000)
+  const inbox = [
+    ...Array.from({ length: 150 }, (_, i) => ({ key: 'l' + i, conv, from: idOf(ahmet), name: 'A', text: long, at: (i + 1) * 1000, mine: false })),
+    { key: 'evil', conv, from: idOf(ahmet), name: '<b>A</b>', text: evil, at: 999_999, mine: false },
+  ]
+  setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
+  await start($)
+  const ui = await $.ui.mount(pane('desktop'))
+  await openChat(ui, 'conv-' + conv)
+  const source = await frameSource(ui)
+  expect(source.length).toBeLessThan(131_072)
+  expect(source).not.toContain('<img')
+  expect(source).not.toContain('evil.example/t.png">')
+  expect(source).toContain('&lt;img src=&quot;https://evil.example/t.png&quot;&gt;')
+  expect((source.match(/<style>/g) ?? []).length).toBe(1)
+  expect((await ui.find({ key: 'older' }))?.text).toBeDefined()
   await ui.unmount()
 })

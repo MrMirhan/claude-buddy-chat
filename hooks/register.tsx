@@ -3,6 +3,7 @@ import nacl from './vendor/nacl.js'
 import { ml_kem768 } from './vendor/mlkem.js'
 import { LANGS, LANG_NAMES, isKey, isLang, translate, type Key, type Lang, type Vars } from './i18n.js'
 import type { ChatRowProps } from './chat-row.tsx'
+import { chatFrame, type FrameMessage } from './chat-frame.js'
 
 // buddy-chat
 // No server of our own. Relay: ntfy.sh (free, no sign-up). Each person's inbox is a topic derived from their public key.
@@ -106,9 +107,15 @@ let hiddenAbove = 0
 // Set while a chat is drawn: the ui.scroll hook then turns the scroll into paging.
 let chatShown = false
 const PAGE_STEP = 8
-// Desktop: a chat scrolls with the pane, so it holds the last DESKTOP_WINDOW messages plus the pages loaded above them.
-const DESKTOP_WINDOW = 40
-const OLDER_PAGE = 20
+// Desktop: the chat frame holds the last DESKTOP_WINDOW messages plus the pages loaded above them,
+// within FRAME_BUDGET characters, since an Svg's source may be 131,072 characters at most.
+const DESKTOP_WINDOW = 150
+const OLDER_PAGE = 100
+const FRAME_BUDGET = 120_000
+// Desktop gives the pane's height in rows; the frame needs pixels. These are first estimates, to be measured.
+const ROW_PX = 16
+const FRAME_CHROME_PX = 210
+let diagWritten = ''
 let olderExtra = 0
 let newestOpen = ''
 
@@ -834,11 +841,10 @@ async function select($: EngineInterface, conv: string) {
 // Opens a Desktop chat at its newest message. In the terminal the chat is pinned to the pane and this changes nothing.
 const scrollToEnd = ($: EngineInterface) => { void $.ui.scroll({ to: 'end', in: PANE }).catch(() => {}) }
 
-// Desktop: loads a page of older messages and keeps the message that was on top in view.
-function loadOlder($: EngineInterface, anchor: string) {
+// Desktop: puts a page of older messages into the chat frame.
+function loadOlder($: EngineInterface) {
   olderExtra += OLDER_PAGE
   $.ui.invalidate('ui.render')
-  if (anchor) void $.ui.scroll({ to: { key: 'msg-' + anchor }, in: PANE, block: 'start' }).catch(() => {})
 }
 
 // Moves the terminal window: a positive step goes to older messages, a negative one back toward the newest.
@@ -1614,7 +1620,7 @@ export const register: Register = on => {
     const olderButton = start > 0 && (
       <Box justifyContent="center">
         <Button key="older" label={t('olderMessages', { count: start })} plain dimColor hotkey={graphic ? undefined : 'o'}
-          onPress={() => (graphic ? loadOlder($, visible[0]?.key ?? '') : pageBy($, PAGE_STEP))} />
+          onPress={() => (graphic ? loadOlder($) : pageBy($, PAGE_STEP))} />
       </Box>
     )
     // Terminal: the pane is held at offset 0, so this row is never seen; it only lets the arrows and page keys raise ui.scroll.
@@ -1630,7 +1636,7 @@ export const register: Register = on => {
 
     const msgActions = (m: Msg) => {
       if (m.deleted) return null
-      const marked = !graphic && m.key === cursor
+      const marked = m.key === cursor
       if (m.mine) {
         return (
           <Box flexDirection="row" columnGap={1}>
@@ -1762,11 +1768,63 @@ export const register: Register = on => {
             }} />
 
     if (graphic) {
-      // An open chat takes the whole pane and scrolls with it: Desktop scrolls a pane itself, which the wheel needs,
-      // and the list beside it would scroll away anyway. The back button returns to the list.
+      // Desktop: the messages sit in a frame that scrolls itself (see chat-frame.ts); the header above it and the
+      // composer below it stay where they are.
+      const frameWindow = thread.slice(-Math.min(thread.length, DESKTOP_WINDOW + olderExtra))
+      const frameMsgs: FrameMessage[] = []
+      let budget = FRAME_BUDGET
+      for (let i = frameWindow.length - 1; i >= 0; i--) {
+        const m = frameWindow[i]!
+        const prev = frameWindow[i - 1]
+        const newDay = !prev || !sameDay(prev.at, m.at)
+        const sameRun = !!prev && !newDay && !prev.system && !m.system && prev.from === m.from && m.at - prev.at < 5 * 60_000
+        const text = textOf(m)
+        budget -= text.length * 2 + 300
+        if (budget < 0 && frameMsgs.length) break
+        frameMsgs.unshift({
+          key: m.key, text, name: nameOf(m.from, m.name), time: clock(m.at), mine: m.mine, system: !!m.system,
+          deleted: !!m.deleted, edited: !!m.edited, forwarded: !m.mine && !!m.forwarded,
+          day: newDay ? dayLabel(m.at, now) : '', showName: !m.mine && !!group && !sameRun && !m.system,
+          color: colorOf(m.from), marked: m.key === cursor,
+        })
+      }
+      const frameHidden = thread.length - frameMsgs.length
+      const framePx = Math.max(200, Math.round((fullHeight ?? 40) * ROW_PX) - FRAME_CHROME_PX)
+
+      // The measurements the frame size is tuned from: the pane's size in Desktop's rows and columns, nothing else.
+      const diag = JSON.stringify({ surface: e.surface, bodyColumns: e.props.bodyColumns, bodyRows: fullHeight, viewport: e.viewport, framePx })
+      if (diag !== diagWritten) {
+        diagWritten = diag
+        void $.env.get('HOME').then(home => (home ? $.fs.write(home + '/.claude/buddy-chat/diag.json', diag) : undefined)).catch(() => {})
+      }
+
+      // k and j mark a message; with no mark the bar acts on the newest one.
+      const markable = thread.filter(m => !m.system && !m.deleted)
+      const target = markable.find(m => m.key === cursor) ?? markable[markable.length - 1]
+      const markStep = (step: 1 | -1) => {
+        const at = cursor ? markable.findIndex(m => m.key === cursor) : markable.length
+        const to = at + step
+        if (to < 0) return
+        cursor = to >= markable.length ? '' : markable[to]?.key ?? ''
+        redraw()
+      }
+
+      const actionBar = target && (
+        <Box flexDirection="row" columnGap={1} alignItems="center">
+          <Button key="nav-up" label="↑" plain dimColor hotkey="k" onPress={() => markStep(-1)} />
+          <Button key="nav-down" label="↓" plain dimColor hotkey="j" onPress={() => markStep(1)} />
+          <Box flexGrow={1} flexShrink={1}>
+            <Text dimColor={!cursor} color={cursor ? ACCENT : undefined} size="caption" wrap="truncate-end">
+              {nameOf(target.from, target.name) + ': ' + textOf(target)}
+            </Text>
+          </Box>
+          {msgActions(target)}
+        </Box>
+      )
+
       return (
-        <Box key="thread" flexDirection="column">
-          <Box flexDirection="row" columnGap={1} alignItems="center" paddingBottom={1}>
+        <Box key="thread" flexDirection="column" height={fullHeight} overflow="hidden" rowGap={1}>
+          <Box flexDirection="row" columnGap={1} alignItems="center">
             <Button key="back" label="←" plain hotkey="b" onPress={() => closeThread($)} />
             {avatar('head-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 40)}
             <Box flexDirection="column" flexGrow={1} flexShrink={1}>
@@ -1775,17 +1833,30 @@ export const register: Register = on => {
             </Box>
             {statusView}
           </Box>
-          {olderButton}
-          {thread.length === 0 && (
-            <Box flexDirection="column" alignItems="center" rowGap={1} marginY={3} flexGrow={1}>
-              {avatar('empty-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 72)}
-              <Text size="title" weight="semibold">{(current.isGroup ? '# ' : '') + current.title}</Text>
-              <Text dimColor size="caption">{'🔒 ' + securityLine}</Text>
-              <Text dimColor>{t('sayHi')}</Text>
+          {frameHidden > 0 && (
+            <Box justifyContent="center">
+              <Button key="older" label={t('olderMessages', { count: frameHidden })} plain dimColor onPress={() => loadOlder($)} />
             </Box>
           )}
-          <Box flexDirection="column">{rowsView}</Box>
-          <Box flexDirection="column" alignItems="stretch" width="100%" marginTop={1}>{composer}</Box>
+          {thread.length === 0
+            ? (
+              <Box flexDirection="column" alignItems="center" justifyContent="center" rowGap={1} flexGrow={1}>
+                {avatar('empty-' + current.id, current.isGroup ? '#' : current.title, convColor(current), 72)}
+                <Text size="title" weight="semibold">{(current.isGroup ? '# ' : '') + current.title}</Text>
+                <Text dimColor size="caption">{'🔒 ' + securityLine}</Text>
+                <Text dimColor>{t('sayHi')}</Text>
+              </Box>
+            )
+            : Svg
+              ? (
+                <Box key="chat-frame" flexGrow={1} flexShrink={1} overflow="hidden">
+                  <Svg alt={t('chatFrameAlt', { title: current.title })} isInteractive height={framePx}
+                    source={chatFrame(frameMsgs, { deleted: t('deletedMsg'), edited: t('editedShort'), forwarded: t('forwarded') })} />
+                </Box>
+              )
+              : <Box flexDirection="column" flexGrow={1}>{rowsView}</Box>}
+          {actionBar}
+          <Box flexDirection="column" alignItems="stretch" width="100%" flexShrink={0}>{composer}</Box>
         </Box>
       )
     }
