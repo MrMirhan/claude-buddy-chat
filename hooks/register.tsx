@@ -2988,7 +2988,7 @@ export const register: Register = on => {
       const newDay = !prev || !sameDay(prev.at, m.at)
       const sameRun = prev && !newDay && !prev.system && !m.system && prev.from === m.from && m.at - prev.at < 5 * 60_000
       const day = newDay
-        ? <Box key={'day-' + m.key} justifyContent="center" marginY={graphic ? 1 : 0}><Text dimColor size="caption">── {dayLabel(m.at, now)} ──</Text></Box>
+        ? <Box key={'day-' + m.key} width="100%" justifyContent="center" marginY={graphic ? 1 : 0}><Text dimColor size="caption">── {dayLabel(m.at, now)} ──</Text></Box>
         : null
 
       if (m.system) {
