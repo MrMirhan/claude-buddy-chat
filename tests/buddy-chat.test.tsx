@@ -1033,3 +1033,43 @@ test('a bare /buddy-link on a device with contacts explains the steps instead of
   expect(reply.text).toContain('kodu bu cihaz alır')
   expect(w.posts.some(p => p.url.includes('buddy-chat-link-'))).toBe(false)
 })
+
+test('devices: the main device lists linked devices and removes one; a linked device can unlink itself', async ($, on) => {
+  const mine = nacl.box.keyPair()
+  const me = idOf(mine)
+  const self = (payload: object) => envelope(mine, me, { t: 'self', id: 's' + Math.random(), ...payload })
+
+  const w = setup(on, { ...V4, secretKey: b64(mine.secretKey), linked: true, primary: true, activeAt: 1_800_000_000_000 })
+  await start($)
+  w.feed.push(self({ dev: 'laptop-dev', kind: 'hello', name: 'laptop', primary: false }))
+  await w.clock.advance(8000)
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-people' })
+  expect(await shows(ui, { type: 'Text', text: /^laptop/ })).toBeDefined()
+  expect(await ui.find({ key: 'link-start' })).toBeUndefined()
+
+  w.answer.value = 'Çıkar'
+  await ui.press({ key: 'device-remove-laptop-dev' })
+  const byes = w.posts.filter(p => p.url === topicOf(me)).map(p => opened(p, mine)).filter(p => p?.kind === 'bye')
+  expect(byes.at(-1)).toMatchObject({ target: 'laptop-dev' })
+  expect(await ui.find({ key: 'device-remove-laptop-dev' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('devices: a linked device that unlinks deletes the account and starts over', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const mine = nacl.box.keyPair()
+  const w = setup(on, { ...V4, secretKey: b64(mine.secretKey), linked: true, primary: false, activeAt: 1_800_000_000_000, contacts: [friend(ahmet, 'Ahmet')] })
+  const before = await start($)
+  expect(before).toBe(idOf(mine))
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-people' })
+  w.answer.value = 'Ayır'
+  await ui.press({ key: 'device-leave' })
+  const byes = w.posts.filter(p => p.url === topicOf(idOf(mine))).map(p => opened(p, mine)).filter(p => p?.kind === 'bye')
+  expect(byes.length).toBe(1)
+  const after = /(?:ID'n|ID): (\S{43})/.exec((await run($, 'buddy-id')).text ?? '')?.[1]
+  expect(after).not.toBe(before)
+  expect(await list($)).not.toContain('Ahmet')
+  await ui.unmount()
+})

@@ -144,6 +144,7 @@ Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da *
 - **Okundu bilgisi ve yazıyor.** İletildi ve okundu bilgileri ile yazıyor sinyali de şifreli mesajdır. Bir bilgi, sadece mesajın gittiği kişiden geldiyse sayılır.
 - **Yeniden gönderme.** Okundu bilgisi gönderen bir sürümdeki arkadaş bir mesajı onaylamazsa buddy-chat onu 11 saatte bir, en fazla 7 gün boyunca yeniden gönderir. Arkadaşının plugin'i zaten aldığı kopyayı atar.
 - **Bağlı cihazlar.** Yeni cihazda **Kişiler → Cihazlar → Yeni cihaz bu**'yu seç (ya da `/buddy-link` çalıştır). Kodu hesabının olduğu cihaza yapıştır. O cihaz anahtarlarını, kişilerini, gruplarını, ayarlarını ve son mesajlarını koddan türeyen bir anahtarla şifreler ve sadece kodun bildiği bir topic'e bırakır. Yeni cihaz bunları açar ve aynı kimliği kullanır. Sonrasında her cihaz değişenlerin (gönderilen mesajlar, düzenlemeler, kişiler, ayarlar) şifreli bir kopyasını kendi topic'ine bırakır. 5 dakikadan uzun ortada olmayan bir cihaz kaçırdıklarını diğerlerinden ister. ML-KEM el sıkışmalarını kimliği ilk oluşturan cihaz yapar; iki cihaz yapsa iki farklı anahtar çıkar.
+- **Cihaz yönetimi.** **Kişiler → Cihazlar** bağlı cihazları bilgisayar adıyla listeler; ana cihazı ve her birinin son görülme zamanını gösterir. Ana cihazda **Çıkar**, diğer cihazdan hesabı silmesini ister; cihaz bunu bir sonraki çevrimiçi olduğunda yapar. Bağlı bir cihazda **Bu cihazı ayır**, oradaki hesabı siler ve yeni bir kimlikle baştan başlar.
 
 ## Güvenlik sınırları
 
@@ -151,7 +152,7 @@ Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da *
 - **Üst veri görünür.** ntfy.sh hangi topic'e ne zaman, hangi IP'den, ne büyüklükte mesaj geldiğini görür.
 - **Üçüncü taraf kod.** TweetNaCl.js Cure53 tarafından denetlendi. noble-post-quantum bağımsız denetimden geçmedi, sadece yazarı denetledi. buddy-chat ikisini birlikte bu yüzden kullanıyor.
 - **Denetlenmedi.** buddy-chat'in kendisi güvenlik denetiminden geçmedi.
-- **Bağlama kodu hesabının kendisidir.** Kodu 10 dakikalık süresi içinde ele geçiren ve relay'i 12 saat içinde okuyan biri anlık görüntüyü açabilir. Kodu sadece kendine gönder. Bağlı cihazlar tek kimliği paylaşır; yeni bir kimlik oluşturmadan tek bir cihazı çıkaramazsın.
+- **Bağlama kodu hesabının kendisidir.** Kodu 10 dakikalık süresi içinde ele geçiren ve relay'i 12 saat içinde okuyan biri anlık görüntüyü açabilir. Kodu sadece kendine gönder. Bağlı cihazlar tek kimliği paylaşır. **Çıkar**, diğer cihazın yerine getirdiği bir istektir: bunu yok sayacak şekilde değiştirilmiş bir cihaz anahtarları tutar. Anahtarları geri almanın tek yolu, arkadaşlarının yeniden eklemesi gereken yeni bir kimliktir.
 
 ## Sınırlar
 

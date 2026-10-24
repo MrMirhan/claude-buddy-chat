@@ -144,6 +144,7 @@ English is the default. To use Turkish, run `/buddy-lang tr`, or select **Türk�
 - **Receipts and typing.** Delivered and read receipts and the typing signal are sealed messages too. A receipt counts only when it comes from a person the message went to.
 - **Resend.** If a friend whose version sends receipts did not confirm a message, buddy-chat sends it again every 11 hours, for up to 7 days. The friend's plugin drops a copy it already has.
 - **Linked devices.** On the new device, select **People → Devices → This is the new device** (or run `/buddy-link`). Paste the code on the device that has your account. That device seals your keys, contacts, groups, settings and recent messages with a key from the code and posts them to a topic that only the code names. The new device opens them and uses the same identity. After that, each device seals a copy of what changes (sent messages, edits, contacts, settings) for itself and posts it to your own topic. A device that was away for more than 5 minutes asks the others for what it missed. The device that made the identity runs the ML-KEM handshakes, because two devices would agree on two different keys.
+- **Managing devices.** **People → Devices** lists the linked devices by computer name, with the main device and the last time each was seen. On the main device, **Remove** asks another device to delete the account; it does so the next time it is online. On a linked device, **Unlink this device** deletes the account there and starts over with a new identity.
 
 ## Security limits
 
@@ -151,7 +152,7 @@ English is the default. To use Turkish, run `/buddy-lang tr`, or select **Türk�
 - **Metadata is visible.** ntfy.sh sees which topics get messages, when, from which IP address, and how large the messages are.
 - **Third-party code.** Cure53 audited TweetNaCl.js. noble-post-quantum has no independent audit; only its author audited it. This is why buddy-chat joins the two in a hybrid key.
 - **Not audited.** buddy-chat itself has had no security audit.
-- **The link code is your account.** Anyone who has the code in its 10 minutes, and reads the relay within 12 hours, can open the snapshot. Send it only to yourself. Linked devices share one identity, so you cannot remove one device without making a new identity.
+- **The link code is your account.** Anyone who has the code in its 10 minutes, and reads the relay within 12 hours, can open the snapshot. Send it only to yourself. Linked devices share one identity. **Remove** is a request that the other device carries out: a device that was changed to ignore it keeps the keys, and only a new identity, which your friends must add again, takes them away.
 
 ## Limits
 

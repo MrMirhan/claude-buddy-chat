@@ -115,7 +115,9 @@ type SelfPayload = {
   t: 'self'
   id: string
   dev: string
-  kind: 'part' | 'sent' | 'patch' | 'state' | 'want' | 'have' | 'linked'
+  kind: 'part' | 'sent' | 'patch' | 'state' | 'want' | 'have' | 'linked' | 'hello' | 'bye'
+  name?: string
+  target?: string
   set?: string; i?: number; n?: number; data?: string
   msg?: Msg; msgs?: Msg[]
   ref?: string; patch?: { text?: string; edited?: boolean; deleted?: boolean }
@@ -165,6 +167,10 @@ let linkPending: { secret: string; until: number } | undefined
 const parts = new Map<string, string[]>()
 let currentStream: { return?: () => unknown } | undefined
 // Linking progress, shown in every session's status line and Devices card; linkTimer polls fast while a code waits.
+// The devices linked to this identity, this one included, as each last announced itself.
+type Device = { name: string; seen: number; primary: boolean }
+let devices: Record<string, Device> = {}
+let deviceName = ''
 let linkStatus = ''
 let linkTimer: { cancel: () => void } | undefined
 const LINK_POLL_MS = 2000
@@ -609,6 +615,23 @@ async function receiveSelf($: EngineInterface, p: SelfPayload) {
     case 'linked':
       $.ui.toast(t('linkConfirmed'))
       await setLinkStatus($, t('linkStatusConfirmed'), 15_000)
+      await saveDevice($, p.dev, { name: cleanText(String(p.name ?? ''), 40) || p.dev.slice(0, 6), seen: await $.clock.now(), primary: false })
+      await announce($)
+      return
+    case 'hello': {
+      const known = !!devices[p.dev]
+      await saveDevice($, p.dev, { name: cleanText(String(p.name ?? ''), 40) || p.dev.slice(0, 6), seen: await $.clock.now(), primary: p.primary === true })
+      // A device we did not know yet learns about this one too.
+      if (!known) await announce($)
+      return
+    }
+    case 'bye':
+      if (p.target === deviceId) {
+        await resetAccount($)
+        $.ui.toast(t('removedHere'))
+      } else {
+        await saveDevice($, typeof p.target === 'string' ? p.target : p.dev, undefined)
+      }
       return
     case 'have': {
       const msgs = asArray<unknown>(p.msgs).map(cleanMsg).filter((m): m is Msg => !!m)
@@ -732,6 +755,62 @@ function stopLinkPolling() {
   linkTimer = undefined
 }
 
+async function saveDevice($: EngineInterface, dev: string, entry: Device | undefined) {
+  const saved = ((await $.store.get('devices')) as Record<string, Device> | undefined) ?? {}
+  const next = { ...saved }
+  if (entry) next[dev] = entry
+  else delete next[dev]
+  devices = next
+  await $.store.set('devices', devices)
+  $.ui.invalidate('ui.render')
+}
+
+async function announce($: EngineInterface) {
+  if (!linked) return
+  await saveDevice($, deviceId, { name: deviceName, seen: await $.clock.now(), primary })
+  await postSelf($, { kind: 'hello', name: deviceName, primary })
+}
+
+// Removing a device is a request the device carries out: it deletes the account here and starts over with a new identity.
+// A device that is off does it when it comes back; one that was changed to ignore it keeps the keys, which only a new identity fixes.
+async function resetAccount($: EngineInterface) {
+  for (const key of ['secretKey', 'kemSeed', 'contacts', 'groups', 'inbox', 'blocked', 'gone', 'readAt', 'muted', 'stateAt', 'lastSeen',
+    'linked', 'primary', 'devices', 'profile', 'profileSent', 'notices', 'typing', 'linkPending', 'activeAt']) {
+    await $.store.delete(key)
+  }
+  sharedKeys.clear()
+  hybridKeys.clear()
+  topics.clear()
+  keys = undefined
+  await loadIdentity($)
+  linked = false
+  primary = true
+  devices = {}
+  selected = ''
+  threadOpen = false
+  currentStream?.return?.()
+  streamLive = false
+  await refresh($, true)
+  $.ui.invalidate('ui.render')
+}
+
+async function leaveLink($: EngineInterface): Promise<string> {
+  if (!linked || primary) return t('leaveNotLinked')
+  if (!(await confirm($, t('leaveConfirm'), t('leaveYes')))) return t('linkCancelled')
+  await postSelf($, { kind: 'bye' })
+  await resetAccount($)
+  return t('leaveDone')
+}
+
+async function removeDevice($: EngineInterface, dev: string): Promise<string> {
+  const d = devices[dev]
+  if (!d || dev === deviceId) return t('removeUnknown')
+  if (!(await confirm($, t('removeConfirm', { name: d.name }), t('removeYes')))) return t('linkCancelled')
+  await postSelf($, { kind: 'bye', target: dev })
+  await saveDevice($, dev, undefined)
+  return t('removeSent', { name: d.name })
+}
+
 // On the new device: wait for a snapshot. Its own identity is replaced when the snapshot arrives.
 async function startLink($: EngineInterface): Promise<string> {
   if (contacts.length && !(await confirm($, t('linkReplaceConfirm'), t('linkReplaceYes')))) return t('linkCancelled')
@@ -792,6 +871,7 @@ async function sendLink($: EngineInterface, text: string): Promise<string> {
   }
   linked = true
   await $.store.set('linked', true)
+  await saveDevice($, deviceId, { name: deviceName, seen: await $.clock.now(), primary })
   // The new device says so once it uses the account; until then this waits, and gives up after the code's lifetime.
   await setLinkStatus($, t('linkStatusWaitingNew'), LINK_TTL_MS)
   return t('linkSent')
@@ -834,7 +914,8 @@ async function pollLink($: EngineInterface) {
       if (await applySnapshot($, snapshot)) {
         stopLinkPolling()
         await setLinkStatus($, t('linkStatusDone'), 15_000)
-        await postSelf($, { kind: 'linked' })
+        await saveDevice($, deviceId, { name: deviceName, seen: await $.clock.now(), primary: false })
+        await postSelf($, { kind: 'linked', name: deviceName })
         return
       }
     }
@@ -1087,6 +1168,8 @@ async function refresh($: EngineInterface, quiet = false) {
   }
   muted = asArray<string>(await $.store.get('muted'))
   primary = (await $.store.get('primary')) !== false
+  const savedDevices = await $.store.get('devices')
+  devices = savedDevices && typeof savedDevices === 'object' ? (savedDevices as Record<string, Device>) : {}
   linked = (await $.store.get('linked')) === true
   gone = numberMap(await $.store.get('gone'))
   stateAt = { blocked: 0, profile: 0, muted: 0, privacy: 0, ...numberMap(await $.store.get('stateAt')) }
@@ -1734,10 +1817,17 @@ export const register: Register = on => {
     const savedDevice = await $.store.get('deviceId')
     deviceId = typeof savedDevice === 'string' ? savedDevice : newId()
     if (savedDevice !== deviceId) await $.store.set('deviceId', deviceId)
+    try {
+      deviceName = cleanText((await $.process.run(['hostname', '-s'], { timeoutMs: 3000 })).stdout, 40)
+    } catch {
+      deviceName = ''
+    }
+    deviceName ||= t('deviceFallback', { id: deviceId.slice(0, 4) })
     await refresh($, true)
     void broadcastProfile($).catch(() => {})
     // Handshake with friends who have no quantum-resistant key yet, such as those updated from 0.4.
     if (primary) void (async () => { for (const f of friends()) if (!f.pq) await sendKem($, f.id) })().catch(() => {})
+    void announce($).catch(() => {})
 
     $.clock.every(POLL_MS, () => tick($))
     // A pane is the session's: one left open in the last session opens again here, until the person closes it.
@@ -2056,6 +2146,19 @@ export const register: Register = on => {
       <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
         <Text dimColor size="footnote">{linked ? t(primary ? 'devicesLinkedPrimary' : 'devicesLinked') : t('devicesHint')}</Text>
         {linkStatus && <Text color="claude" weight="semibold">{linkStatus}</Text>}
+        {linked && Object.entries(devices).sort((a, b) => b[1].seen - a[1].seen).map(([dev, d]) => (
+          <Box key={'device-' + dev} flexDirection="row" columnGap={1} alignItems="center">
+            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+              <Text weight="semibold" wrap="truncate-end">
+                {d.name}{dev === deviceId ? ' · ' + t('deviceThis') : ''}{d.primary ? ' · ' + t('devicePrimary') : ''}
+              </Text>
+              <Text dimColor size="caption">{t('deviceSeen', { when: shortWhen(d.seen, now) })}</Text>
+            </Box>
+            {dev === deviceId
+              ? (!primary && <Button key="device-leave" label={t('leaveButton')} plain={graphic ? undefined : true} dimColor onPress={async () => toast(await leaveLink($))} />)
+              : (primary && <Button key={'device-remove-' + dev} label={t('removeButton')} plain={graphic ? undefined : true} dimColor onPress={async () => toast(await removeDevice($, dev))} />)}
+          </Box>
+        ))}
         {pendingCode
           ? (
             <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
@@ -2068,7 +2171,7 @@ export const register: Register = on => {
               </Box>
             </Box>
           )
-          : <Button key="link-start" label={t('linkStart')} plain={graphic ? undefined : true} onPress={async () => toast(await startLink($))} />}
+          : !contacts.length && !linked && <Button key="link-start" label={t('linkStart')} plain={graphic ? undefined : true} onPress={async () => toast(await startLink($))} />}
         {Input && (
           <Input key={'link-code' + (linkSeq ? '-' + linkSeq : '')} placeholder={t('linkPaste')} value="" submitLabel={t('linkSend')}
             onSubmit={async (value: string) => {
