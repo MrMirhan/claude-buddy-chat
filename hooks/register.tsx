@@ -1496,15 +1496,18 @@ export const register: Register = on => {
           {Client
             ? (
               // The whole text area takes the click on Desktop; VS Code and mobile have no Client and keep the name button.
-              <Client key={'conv-' + c.id} module="./chat-row.tsx" flexGrow={1}
-                props={{
-                  conv: c.id,
-                  title: (c.isGroup ? '# ' : '') + c.title,
-                  preview: previewOf(last),
-                  when: last ? shortWhen(last.at, now) : '',
-                  unread: c.unread,
-                  accent: ACCENT,
-                } satisfies ChatRowProps} />
+              // The Client sizes to its text unless the box around it holds it to the row's width.
+              <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+                <Client key={'conv-' + c.id} module="./chat-row.tsx" flexGrow={1}
+                  props={{
+                    conv: c.id,
+                    title: (c.isGroup ? '# ' : '') + c.title,
+                    preview: previewOf(last),
+                    when: last ? shortWhen(last.at, now) : '',
+                    unread: c.unread,
+                    accent: ACCENT,
+                  } satisfies ChatRowProps} />
+              </Box>
             )
             : (
           <Box flexDirection="column" flexGrow={1} flexShrink={1}>

@@ -17,15 +17,15 @@ const ChatRow: ClientModule<ChatRowProps> = (row, surface) => {
   })
   const unread = row.unread > 0
   return (
-    <Box flexDirection="column" flexGrow={1}>
+    <Box flexDirection="column" flexGrow={1} minWidth={0}>
       <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
-        <Text weight="semibold" wrap="truncate-end">{row.title}</Text>
-        <Text size="caption" dimColor={!unread} color={unread ? row.accent : undefined}>{row.when}</Text>
+        <Box flexShrink={1} minWidth={0}><Text weight="semibold" wrap="truncate-end">{row.title}</Text></Box>
+        <Box flexShrink={0}><Text size="caption" dimColor={!unread} color={unread ? row.accent : undefined}>{row.when}</Text></Box>
       </Box>
       <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
-        <Text size="footnote" dimColor={!unread} wrap="truncate-end">{row.preview}</Text>
+        <Box flexShrink={1} minWidth={0}><Text size="footnote" dimColor={!unread} wrap="truncate-end">{row.preview}</Text></Box>
         {unread && (
-          <Box backgroundColor={row.accent} borderStyle="round" borderColor={row.accent} paddingX={1}>
+          <Box flexShrink={0} backgroundColor={row.accent} borderStyle="round" borderColor={row.accent} paddingX={1}>
             <Text size="caption" weight="bold" color="#ffffff">{row.unread > 99 ? '99+' : String(row.unread)}</Text>
           </Box>
         )}
