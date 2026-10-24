@@ -2438,6 +2438,8 @@ export const register: Register = on => {
   // The chat is drawn taller than the pane (see restOffset), so the wheel, the arrows and the page keys raise ui.scroll.
   // The pane is held at its rest row and the scroll moves the messages instead: a tick or an arrow by one, a page key by a page.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
+    // A move to the very top would leave the wheel no room to go up; the rest row is as high as the chat goes.
+    if (chatShown && restOffset && e.origin?.kind === 'plugin' && e.offset < restOffset) return next({ ...e, offset: restOffset })
     if (!chatShown || e.by === 0 || e.origin?.kind !== 'person') return next(e)
     if (restOffset === 0) {
       const step = Math.min(PAGE_STEP, Math.max(1, Math.round(Math.abs(e.by))))
@@ -3391,6 +3393,8 @@ export const register: Register = on => {
       if (restedFor !== current.id) {
         restedFor = current.id
         restTries = 0
+        // Desktop may not have laid the chat out yet when the first try goes, so a few more follow.
+        if (fullHeight && e.surface === 'desktop') for (const ms of [300, 800, 1500]) $.clock.after(ms, () => scrollToRest($))
       }
       if (e.props.scroll?.offset === restOffset) restTries = 0
       if (fullHeight && e.surface === 'desktop' && e.props.scroll?.offset !== restOffset && !restQueued && restTries < 5) {
@@ -3435,7 +3439,7 @@ export const register: Register = on => {
               )}
             {newerButton}
             {actionBar}
-            <Box flexDirection="row" alignItems="flex-end" columnGap={1} width="100%" flexShrink={0}>
+            <Box flexDirection="row" alignItems="flex-start" columnGap={1} width="100%" flexShrink={0}>
               {attachButton}
               <Box flexDirection="column" alignItems="stretch" flexGrow={1} flexShrink={1}>{composer}</Box>
             </Box>
