@@ -32,6 +32,10 @@ const en = {
   typingOn: 'Typing: on',
   typingOff: 'Typing: off',
   typingNow: 'typing…',
+  notificationsOn: 'Notifications: on',
+  notificationsOff: 'Notifications: off',
+  mute: 'Mute',
+  unmute: 'Unmute',
   copyButton: 'Copy',
   copiedMsg: 'Message copied.',
 
@@ -246,6 +250,10 @@ const tr: Record<Key, string> = {
   typingOn: 'Yazıyor: açık',
   typingOff: 'Yazıyor: kapalı',
   typingNow: 'yazıyor…',
+  notificationsOn: 'Bildirimler: açık',
+  notificationsOff: 'Bildirimler: kapalı',
+  mute: 'Sessize al',
+  unmute: 'Sesi aç',
   copyButton: 'Kopyala',
   copiedMsg: 'Mesaj kopyalandı.',
 

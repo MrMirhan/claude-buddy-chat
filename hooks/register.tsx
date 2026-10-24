@@ -38,7 +38,8 @@ const USERNAME_RE = /^[a-z0-9_.]{2,24}$/
 
 type Profile = { username: string; displayName: string }
 // Off means neither side's: with read receipts off you send none and see none, as in WhatsApp.
-type Privacy = { readReceipts: boolean; typing: boolean }
+// notifications covers toasts and OS notifications; a muted chat is silenced on its own.
+type Privacy = { readReceipts: boolean; typing: boolean; notifications: boolean }
 type Typing = { conv: string; from: string; until: number }
 type ReceiptKind = 'delivered' | 'read'
 type Contact = {
@@ -106,7 +107,8 @@ let groups: Group[] = []
 let inbox: Msg[] = []
 let readAt: Record<string, number> = {}
 let status: Status | undefined
-let privacy: Privacy = { readReceipts: true, typing: true }
+let privacy: Privacy = { readReceipts: true, typing: true, notifications: true }
+let muted: string[] = []
 let typing: Typing[] = []
 // Receipts wait here until the batch they arrived in is handled, then go out one post per person and kind.
 const receiptQueue = new Map<string, Set<string>>()
@@ -388,6 +390,11 @@ async function sendTyping($: EngineInterface, conv: string, value: string) {
   await post($, conv.slice(3), { t: 'typing', id: newId() })
 }
 
+async function toggleMute($: EngineInterface, conv: string) {
+  muted = await mutate<string>($, 'muted', current => (current.includes(conv) ? current.filter(c => c !== conv) : [...current, conv]))
+  $.ui.invalidate('ui.render')
+}
+
 async function setPrivacy($: EngineInterface, patch: Partial<Privacy>) {
   privacy = { ...privacy, ...patch }
   await $.store.set('privacy', privacy)
@@ -396,7 +403,11 @@ async function setPrivacy($: EngineInterface, patch: Partial<Privacy>) {
 }
 
 // Only the polling session calls this, so each machine gets one OS notification.
-function notify($: EngineInterface, title: string, text: string) {
+const isOnScreen = (conv: string) => threadOpen && selected === conv
+
+// conv: the chat it is about, so a muted chat stays quiet.
+function notify($: EngineInterface, title: string, text: string, conv?: string) {
+  if (!privacy.notifications || (conv && (muted.includes(conv) || isOnScreen(conv)))) return
   void $.ui.notify(text.slice(0, 200), { title }).catch(() => {})
 }
 
@@ -499,7 +510,7 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
       await addMessages($, [{ key: p.id, conv: convOf(env.from), from: env.from, name: ownName(c.profile), text, at, mine: false }])
       queueReceipt(env.from, 'delivered', p.id)
       await setTyping($, convOf(env.from), env.from, 0)
-      notify($, nameOf(env.from), text)
+      notify($, nameOf(env.from), text, convOf(env.from))
       return
     }
     case 'receipt': {
@@ -551,7 +562,7 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
     const text = String(p.text ?? '')
     await addMessages($, [{ key: p.id, conv: groupConv(group.id), from: env.from, name: member.name, text, at, mine: false }])
     queueReceipt(env.from, 'delivered', p.id)
-    notify($, '# ' + group.title, nameOf(env.from, member.name) + ': ' + text)
+    notify($, '# ' + group.title, nameOf(env.from, member.name) + ': ' + text, groupConv(group.id))
   } else if (p.t === 'leave') {
     await saveGroup($, { ...group, members: group.members.filter(m => m.id !== env.from) })
     await addMessages($, [systemMsg(p.id, groupConv(group.id), { key: 'sysLeftGroup', vars: { name: nameOf(env.from, member.name) } }, at)])
@@ -571,7 +582,12 @@ async function refresh($: EngineInterface, quiet = false) {
   readAt = savedRead && typeof savedRead === 'object' ? (savedRead as Record<string, number>) : {}
   status = (await $.store.get('status')) as Status | undefined
   const savedPrivacy = (await $.store.get('privacy')) as Partial<Privacy> | undefined
-  privacy = { readReceipts: savedPrivacy?.readReceipts !== false, typing: savedPrivacy?.typing !== false }
+  privacy = {
+    readReceipts: savedPrivacy?.readReceipts !== false,
+    typing: savedPrivacy?.typing !== false,
+    notifications: savedPrivacy?.notifications !== false,
+  }
+  muted = asArray<string>(await $.store.get('muted'))
   typing = privacy.typing ? asArray<Typing>(await $.store.get('typing')) : []
   pollerAt = ((await $.store.get('poller')) as { at?: number } | undefined)?.at ?? 0
   if (selected && !conversations().some(c => c.id === selected)) selected = ''
@@ -579,23 +595,24 @@ async function refresh($: EngineInterface, quiet = false) {
   for (const m of inbox) {
     if (shown.has(m.key)) continue
     shown.add(m.key)
-    if (quiet || m.mine || m.deleted) continue
+    // A toast over an open chat would cover its composer and repeat what is already on screen.
+    if (quiet || m.mine || m.deleted || !privacy.notifications || muted.includes(m.conv) || isOnScreen(m.conv)) continue
     const group = groups.find(g => groupConv(g.id) === m.conv)
     $.ui.toast((group ? group.title + ' · ' : '') + (m.system ? textOf(m) : nameOf(m.from, m.name) + ': ' + m.text).slice(0, 90))
   }
   for (const c of contacts) {
     if (c.state !== 'incoming' || shown.has('req:' + c.id)) continue
     shown.add('req:' + c.id)
-    if (!quiet) $.ui.toast(t('notifyWantsToAdd', { name: ownName(c.profile) || shortId(c.id) }))
+    if (!quiet && privacy.notifications) $.ui.toast(t('notifyWantsToAdd', { name: ownName(c.profile) || shortId(c.id) }))
   }
   for (const n of asArray<Notice>(await $.store.get('notices'))) {
     if (shown.has('notice:' + n.key)) continue
     shown.add('notice:' + n.key)
-    if (!quiet && n.sys && isKey(n.sys.key)) $.ui.toast(t(n.sys.key, n.sys.vars))
+    if (!quiet && privacy.notifications && n.sys && isKey(n.sys.key)) $.ui.toast(t(n.sys.key, n.sys.vars))
   }
 
   const next = JSON.stringify([
-    lang, profile, contacts, blocked, groups, status?.state, privacy, typing,
+    lang, profile, contacts, blocked, groups, status?.state, privacy, typing, muted,
     inbox.map(m => [m.key, m.text.length, m.forwarded, m.edited, m.deleted, m.state, m.deliveredTo?.length, m.readBy?.length]),
   ])
   if (next !== signature) {
@@ -1444,6 +1461,8 @@ export const register: Register = on => {
           onPress={() => setPrivacy($, { readReceipts: !privacy.readReceipts })} />
         <Button key="toggle-typing" label={t(privacy.typing ? 'typingOn' : 'typingOff')} plain dimColor={!privacy.typing}
           onPress={() => setPrivacy($, { typing: !privacy.typing })} />
+        <Button key="toggle-notify" label={t(privacy.notifications ? 'notificationsOn' : 'notificationsOff')} plain dimColor={!privacy.notifications}
+          onPress={() => setPrivacy($, { notifications: !privacy.notifications })} />
       </Box>
     )
 
@@ -1697,7 +1716,7 @@ export const register: Register = on => {
                 <Client key={'conv-' + c.id} module="./chat-row.tsx" flexGrow={1}
                   props={{
                     conv: c.id,
-                    title: (c.isGroup ? '# ' : '') + c.title,
+                    title: (c.isGroup ? '# ' : '') + c.title + (muted.includes(c.id) ? ' 🔕' : ''),
                     preview: isTyping(c.id) ? t('typingNow') : previewOf(last),
                     when: last ? shortWhen(last.at, now) : '',
                     unread: c.unread,
@@ -1709,7 +1728,7 @@ export const register: Register = on => {
           <Box flexDirection="column" flexGrow={1} flexShrink={1}>
             <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
               <Button key={'conv-' + c.id} plain onPress={() => select($, c.id)}>
-                <Text weight="semibold">{(c.isGroup ? '# ' : '') + c.title}</Text>
+                <Text weight="semibold">{(c.isGroup ? '# ' : '') + c.title + (muted.includes(c.id) ? ' 🔕' : '')}</Text>
               </Button>
               <Text dimColor={c.unread === 0} color={c.unread > 0 ? ACCENT : undefined} size="caption">{last ? shortWhen(last.at, now) : ''}</Text>
             </Box>
@@ -1835,6 +1854,11 @@ export const register: Register = on => {
       <Box justifyContent="center">
         <Button key="newer" label={t('newerMessages', { count: below })} plain dimColor onPress={() => pageBy($, -PAGE_STEP)} />
       </Box>
+    )
+    const isMuted = muted.includes(current.id)
+    const muteButton = (
+      <Button key="mute" label={graphic ? (isMuted ? '🔕' : '🔔') : (isMuted ? t('unmute') : t('mute'))} plain dimColor={!isMuted}
+        hotkey="m" onPress={() => toggleMute($, current.id)} />
     )
     const securityLine = group
       ? group.members.map(m => nameOf(m.id, m.name)).join(', ') + ' · ' + t('groupSecurity')
@@ -2054,6 +2078,7 @@ export const register: Register = on => {
                   ? <Text color={ACCENT} size="caption" italic>{t('typingNow')}</Text>
                   : <Text dimColor size="caption" wrap="truncate-end">{'🔒 ' + securityLine}</Text>}
               </Box>
+              {muteButton}
               {statusView}
             </Box>
             {olderButton}
@@ -2089,7 +2114,7 @@ export const register: Register = on => {
           {convs.map((c, i) => (
             <Button key={'conv-' + c.id} plain hotkey={i < 9 ? String(i + 1) : undefined} dimColor={c.id !== current.id}
               onPress={() => select($, c.id)}>
-              {(c.isGroup ? '# ' : '') + c.title}{c.unread ? <Text color="warning"> ●{c.unread}</Text> : ''}
+              {(c.isGroup ? '# ' : '') + c.title + (muted.includes(c.id) ? ' 🔕' : '')}{c.unread ? <Text color="warning"> ●{c.unread}</Text> : ''}
             </Button>
           ))}
         </Box>
@@ -2112,6 +2137,7 @@ export const register: Register = on => {
           )}
           <Button key="nav-down" label="↓" plain dimColor hotkey="j" onPress={() => moveCursor(1)} />
           <Button key="nav-up" label="↑" plain dimColor hotkey="k" onPress={() => moveCursor(-1)} />
+          {muteButton}
         </Box>
         <Text dimColor wrap="truncate-end">{t('terminalHint')}</Text>
         <Text dimColor wrap="truncate-end">{t('terminalHint2')}</Text>

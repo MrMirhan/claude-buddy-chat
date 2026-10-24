@@ -16,7 +16,7 @@ buddy-chat is a Claude Code [mod](https://code.claude.com/docs/en/plugins/mods/o
 - A typing indicator in direct chats
 - Privacy switches for read receipts and the typing indicator. With read receipts off, you send none and see none.
 - Remove a friend (they are told) or block someone (they are not told)
-- Toasts and operating system notifications for new messages and requests
+- Toasts and operating system notifications for new messages and requests, with a switch for all of them and a mute button for each chat. A chat that is open on screen does not notify.
 - A pane in the Claude Code Desktop app, the VS Code extension and the terminal
 - English and Turkish. English is the default.
 
