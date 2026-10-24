@@ -2,6 +2,7 @@ import { expect, mock, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import nacl from '../hooks/vendor/nacl.js'
 import { ml_kem768 } from '../hooks/vendor/mlkem.js'
+import { backupKey, fromWords, keysFromEntropy, toWords } from '../hooks/recovery.js'
 
 type KP = { publicKey: Uint8Array; secretKey: Uint8Array }
 type Post = { url: string; body: string }
@@ -1141,4 +1142,112 @@ test('history: messages past the store cap go to files and come back when scroll
   }
   expect(await shows(ui, { type: 'Text', text: /^eski 0$/ })).toBeDefined()
   await ui.unmount()
+})
+
+// An in-memory file system and HOME for tests that read and write files.
+function memoryFs(on: Parameters<typeof setup>[0], files: Map<string, string>) {
+  on('env.get', (_, e) => ({ value: (e as { name: string }).name === 'HOME' ? '/home/test' : undefined }) as never)
+  on('fs.write', (_, e) => { const { path, text } = e as { path: string; text: string }; files.set(path, text); return { value: undefined } as never })
+  on('fs.read', (_, e) => {
+    const text = files.get((e as { path: string }).path)
+    if (text === undefined) throw new Error('missing')
+    return { value: text } as never
+  })
+  on('fs.list', (_, e) => {
+    const dir = (e as { path: string }).path + '/'
+    return { value: [...files.keys()].filter(p => p.startsWith(dir)).map(p => ({ name: p.slice(dir.length), kind: 'file', size: 1, mtimeMs: 0, isLink: false })) } as never
+  })
+}
+
+const wordsShown = async (ui: { findAll: (q: never) => Promise<{ text?: string }[]> }) =>
+  (await ui.findAll({ type: 'Text', text: /^\s?\d+\. [a-z]+$/ } as never)).map(t => (t.text ?? '').trim().split(' ')[1]!)
+
+test('recovery: a new identity has 12 words that make the same keys; an older one has 24', async ($, on) => {
+  const w = setup(on, { ...V4 })
+  const me = await start($)
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-people' })
+  w.answer.value = 'Göster'
+  await ui.press({ key: 'words-show' })
+  const words = await wordsShown(ui as never)
+  expect(words.length).toBe(12)
+  const entropy = fromWords(words.join(' '))!
+  expect(b64(nacl.box.keyPair.fromSecretKey(keysFromEntropy(entropy).secretKey).publicKey)).toBe(me)
+  // One wrong word fails the checksum or the list.
+  expect(fromWords([...words.slice(0, 11), words[11] === 'zoo' ? 'abandon' : 'zoo'].join(' '))).toBeUndefined()
+  await ui.unmount()
+})
+
+test('recovery: 24 words of an older identity hold its secret key', async ($, on) => {
+  const mine = nacl.box.keyPair()
+  const w = setup(on, { ...V4, secretKey: b64(mine.secretKey) })
+  await start($)
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-people' })
+  w.answer.value = 'Göster'
+  await ui.press({ key: 'words-show' })
+  const words = await wordsShown(ui as never)
+  expect(words.length).toBe(24)
+  expect(b64(fromWords(words.join(' '))!)).toBe(b64(mine.secretKey))
+  await ui.unmount()
+})
+
+test('recovery: restoring from words brings back the Buddy ID', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')] })
+  const before = await start($)
+  const entropy = nacl.randomBytes(16)
+  const expected = b64(nacl.box.keyPair.fromSecretKey(keysFromEntropy(entropy).secretKey).publicKey)
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-people' })
+  w.answer.value = 'Geri yükle'
+  await ui.input({ key: 'restore-words', text: toWords(entropy).join(' ') })
+  const after = /(?:ID'n|ID): (\S{43})/.exec((await run($, 'buddy-id')).text ?? '')?.[1]
+  expect(after).toBe(expected)
+  expect(after).not.toBe(before)
+  expect(await list($)).not.toContain('Ahmet')
+  await ui.unmount()
+})
+
+test('backup: written sealed to the chosen folder, and loaded back after a restore', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const mine = nacl.box.keyPair()
+  const files = new Map<string, string>()
+  memoryFs(on, files)
+  setup(on, { ...V4, secretKey: b64(mine.secretKey), contacts: [friend(ahmet, 'Ahmet')],
+    inbox: [{ key: 'b2b2b2b2b2b2b2b2', conv: 'dm:' + idOf(ahmet), from: idOf(ahmet), name: 'A', text: 'yedekteki mesaj', at: 1000, mine: false }] })
+  await start($)
+  const reply = await run($, 'buddy-backup', '~/Backups/buddy')
+  expect(reply.text).toContain('/home/test/Backups/buddy/')
+  const [path, text] = [...files.entries()].find(([p]) => p.endsWith('.backup'))!
+  expect(text.includes('yedekteki mesaj')).toBe(false)
+  const file = JSON.parse(text)
+  const snap = JSON.parse(new TextDecoder().decode(nacl.secretbox.open(unb64(file.box), unb64(file.nonce), backupKey(mine.secretKey))!))
+  expect(snap.contacts.map((c: { id: string }) => c.id)).toEqual([idOf(ahmet)])
+  expect(path.startsWith('/home/test/Backups/buddy/buddy-chat-')).toBe(true)
+})
+
+test('backup: a restored identity loads its backup and stays the main device', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const mine = nacl.box.keyPair()
+  const files = new Map<string, string>()
+  memoryFs(on, files)
+  const snap = {
+    v: 1, secretKey: b64(mine.secretKey), kemSeed: b64(nacl.randomBytes(64)), lastSeen: 'ev1', lang: 'tr',
+    contacts: [friend(ahmet, 'Ahmet')], groups: [], gone: {}, blocked: [], profile: { username: 'deniz', displayName: 'Deniz' },
+    muted: [], privacy: { readReceipts: true, typing: true, notifications: true, sound: 'auto' }, readAt: {}, at: {},
+    inbox: [{ key: 'c3c3c3c3c3c3c3c3', conv: 'dm:' + idOf(ahmet), from: idOf(ahmet), name: 'A', text: 'geri geldi', at: 1000, mine: false }],
+  }
+  const nonce = nacl.randomBytes(24)
+  const box = nacl.secretbox(enc(JSON.stringify(snap)), nonce, backupKey(mine.secretKey))
+  files.set('/home/test/old.backup', JSON.stringify({ v: 1, kind: 'buddy-chat-backup', id: idOf(mine), nonce: b64(nonce), box: b64(box) }))
+  const w = setup(on, { ...V4, secretKey: b64(mine.secretKey) })
+  await start($)
+  const reply = await run($, 'buddy-backup', 'load ~/old.backup')
+  expect(reply.text).toContain('Yedek yüklendi')
+  expect(await list($)).toContain('Ahmet')
+  expect(w.toasts.some(t => t.includes('geri geldi'))).toBe(false)
+  const other = nacl.box.keyPair()
+  files.set('/home/test/other.backup', JSON.stringify({ v: 1, kind: 'buddy-chat-backup', id: idOf(other), nonce: b64(nonce), box: b64(box) }))
+  expect((await run($, 'buddy-backup', 'load ~/other.backup')).text).toContain('başka bir hesaba')
 })

@@ -14,6 +14,7 @@ buddy-chat is a Claude Code [mod](https://code.claude.com/docs/en/plugins/mods/o
 - Edit and delete your own messages for everyone, and copy any message
 - Message states: sending ◷, sent ✓, delivered ✓✓ and read (blue ✓✓)
 - A typing indicator in direct chats
+- Recovery words (12, or 24 for accounts made before 0.17) that bring your account back after a wipe, and an optional encrypted backup to a folder on your computer
 - One account on several computers: link a device, and messages and settings sync between your devices
 - Messages that are not confirmed go out again for up to 7 days, so a friend who is away for more than 12 hours still gets them
 - Privacy switches for read receipts and the typing indicator. With read receipts off, you send none and see none.
@@ -119,6 +120,7 @@ The pane is the same on every surface. Each app draws it in its own style.
 | `/buddy-send <person or group> <message>` | Send a message |
 | `/buddy-group <name> <person1> [person2 ...]` | Create a group |
 | `/buddy-lang <en or tr>` | Set the language |
+| `/buddy-backup [folder \| off \| now \| load <file>]` | Turn the encrypted local backup on or off, write one now, or load one |
 | `/buddy-link [code]` | Without a code: show a code on a new device. With a code: link that device to your account |
 
 You can name a person by their nickname, their display name or their `@username`.
@@ -147,12 +149,19 @@ English is the default. To use Turkish, run `/buddy-lang tr`, or select **Türk�
 - **Linked devices.** On the new device, select **People → Devices → This is the new device** (or run `/buddy-link`). Paste the code on the device that has your account. That device seals your keys, contacts, groups, settings and recent messages with a key from the code and posts them to a topic that only the code names. The new device opens them and uses the same identity. After that, each device seals a copy of what changes (sent messages, edits, contacts, settings) for itself and posts it to your own topic. A device that was away for more than 5 minutes asks the others for what it missed. The device that made the identity runs the ML-KEM handshakes, because two devices would agree on two different keys.
 - **Managing devices.** **People → Devices** lists the linked devices by computer name, with the main device and the last time each was seen. On the main device, **Remove** asks another device to delete the account; it does so the next time it is online. On a linked device, **Unlink this device** deletes the account there and starts over with a new identity.
 
+## Recovery and backup
+
+**People → Recovery and backup** shows your recovery words after a confirmation. Write them on paper. On a new or wiped computer, type them in the same card, and your Buddy ID comes back: friends keep you. Accounts made with 0.17 or later have 12 words; older accounts have 24, because their key was not made from words. The words never go through a command, because what you type at the prompt is kept in the transcript.
+
+The words do not hold contacts or messages. For those, set a backup folder in the same card or with `/buddy-backup <folder>`. buddy-chat then writes `buddy-chat-<id>.backup` there every 10 minutes when something changed. The file is sealed with a key that comes from your secret key, so only your recovery words open it. After a restore, load the file in the card or with `/buddy-backup load <file>`. Backup is off until you set a folder. A folder that a cloud drive syncs works too.
+
 ## Security limits
 
 - **No forward secrecy.** buddy-chat has no ratchet like Signal's Double Ratchet. If someone takes your secret keys from your machine, they can open the messages that ntfy.sh still keeps, which is up to 12 hours of messages.
 - **Metadata is visible.** ntfy.sh sees which topics get messages, when, from which IP address, and how large the messages are.
 - **Third-party code.** Cure53 audited TweetNaCl.js. noble-post-quantum has no independent audit; only its author audited it. This is why buddy-chat joins the two in a hybrid key.
 - **Not audited.** buddy-chat itself has had no security audit.
+- **The recovery words are your account.** Anyone who has them can read and send your messages, and can open your backups.
 - **The link code is your account.** Anyone who has the code in its 10 minutes, and reads the relay within 12 hours, can open the snapshot. Send it only to yourself. Linked devices share one identity. **Remove** is a request that the other device carries out: a device that was changed to ignore it keeps the keys, and only a new identity, which your friends must add again, takes them away.
 
 ## Limits

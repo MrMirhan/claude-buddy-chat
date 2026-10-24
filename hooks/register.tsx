@@ -2,6 +2,7 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 import nacl from './vendor/nacl.js'
 import { ml_kem768 } from './vendor/mlkem.js'
 import { LANGS, LANG_NAMES, isKey, isLang, translate, type Key, type Lang, type Vars } from './i18n.js'
+import { backupKey, fromWords, keysFromEntropy, toWords } from './recovery.js'
 import type { ChatRowProps } from './chat-row.tsx'
 
 // buddy-chat
@@ -194,6 +195,11 @@ let filter = ''
 let composeSeq = 0
 let addSeq = 0
 let linkSeq = 0
+let restoreSeq = 0
+// Recovery words show only in the pane, after a confirmation, and only until hidden.
+let shownWords: string[] = []
+let backupDir = ''
+let backupAt = 0
 let groupSeq = 0
 let pollerAt = 0
 // Terminal: the message j/k marked; its actions take one key (e, x, f). Empty: no mark.
@@ -863,8 +869,9 @@ async function announce($: EngineInterface) {
 
 // Removing a device is a request the device carries out: it deletes the account here and starts over with a new identity.
 // A device that is off does it when it comes back; one that was changed to ignore it keeps the keys, which only a new identity fixes.
-async function resetAccount($: EngineInterface) {
-  for (const key of ['secretKey', 'kemSeed', 'contacts', 'groups', 'inbox', 'blocked', 'gone', 'readAt', 'muted', 'stateAt', 'lastSeen',
+// With `entropy` the identity those recovery words hold comes back; without it a new one is made.
+async function resetAccount($: EngineInterface, entropy?: Uint8Array) {
+  for (const key of ['secretKey', 'kemSeed', 'recovery', 'contacts', 'groups', 'inbox', 'blocked', 'gone', 'readAt', 'muted', 'stateAt', 'lastSeen',
     'linked', 'primary', 'devices', 'profile', 'profileSent', 'notices', 'typing', 'linkPending', 'activeAt']) {
     await $.store.delete(key)
   }
@@ -873,6 +880,12 @@ async function resetAccount($: EngineInterface) {
   topics.clear()
   forgetHistory()
   keys = undefined
+  if (entropy) {
+    const derived = keysFromEntropy(entropy)
+    await $.store.set('secretKey', b64(derived.secretKey))
+    await $.store.set('kemSeed', b64(derived.kemSeed))
+    if (entropy.length === 16) await $.store.set('recovery', b64(entropy))
+  }
   await loadIdentity($)
   linked = false
   primary = true
@@ -931,8 +944,8 @@ async function sendLink($: EngineInterface, text: string): Promise<string> {
   if (!(await confirm($, t('linkConfirm'), t('linkConfirmYes')))) return t('linkCancelled')
 
   const snapshot = {
-    v: 1, secretKey: await $.store.get('secretKey'), kemSeed: await $.store.get('kemSeed'), lastSeen: await $.store.get('lastSeen'),
-    lang, ...currentState(), inbox: [...inbox],
+    v: 1, secretKey: await $.store.get('secretKey'), kemSeed: await $.store.get('kemSeed'), recovery: await $.store.get('recovery'),
+    lastSeen: await $.store.get('lastSeen'), lang, ...currentState(), inbox: [...inbox],
   }
   let json = JSON.stringify(snapshot)
   while (json.length > SNAPSHOT_MAX_CHARS && snapshot.inbox.length) {
@@ -1016,13 +1029,18 @@ async function pollLink($: EngineInterface) {
     : t('linkStatusWaiting', { min: Math.max(1, Math.ceil((linkPending.until - now) / 60_000)) }))
 }
 
-async function applySnapshot($: EngineInterface, value: unknown): Promise<boolean> {
-  const snap = value as Partial<SyncState> & { v?: number; secretKey?: unknown; kemSeed?: unknown; lastSeen?: unknown; lang?: unknown; inbox?: unknown }
+// fromBackup: this device's own backup, so it stays the main device and is linked to nothing.
+async function applySnapshot($: EngineInterface, value: unknown, fromBackup = false): Promise<boolean> {
+  const snap = value as Partial<SyncState> & {
+    v?: number; secretKey?: unknown; kemSeed?: unknown; recovery?: unknown; lastSeen?: unknown; lang?: unknown; inbox?: unknown
+  }
   if (!snap || snap.v !== 1 || typeof snap.secretKey !== 'string' || typeof snap.kemSeed !== 'string') return false
   try { nacl.box.keyPair.fromSecretKey(unb64(snap.secretKey)) } catch { return false }
 
   await $.store.set('secretKey', snap.secretKey)
   await $.store.set('kemSeed', snap.kemSeed)
+  if (typeof snap.recovery === 'string') await $.store.set('recovery', snap.recovery)
+  else await $.store.delete('recovery')
   sharedKeys.clear()
   hybridKeys.clear()
   topics.clear()
@@ -1047,19 +1065,105 @@ async function applySnapshot($: EngineInterface, value: unknown): Promise<boolea
   if (isLang(snap.lang)) await $.store.set('lang', snap.lang)
   if (typeof snap.lastSeen === 'string') await $.store.set('lastSeen', snap.lastSeen)
   else await $.store.delete('lastSeen')
-  await $.store.set('primary', false)
-  await $.store.set('linked', true)
+  await $.store.set('primary', fromBackup)
+  await $.store.set('linked', !fromBackup)
   await $.store.set('activeAt', now)
   await $.store.delete('linkPending')
   linkPending = undefined
-  primary = false
-  linked = true
+  primary = fromBackup
+  linked = !fromBackup
   // The stream listened on the old identity's topic; the loop opens it again on the new one.
   currentStream?.return?.()
   streamLive = false
   await refresh($, true)
-  $.ui.toast(t('linkDone'))
+  if (!fromBackup) $.ui.toast(t('linkDone'))
   return true
+}
+
+// ---- Recovery words and backups ----
+
+const BACKUP_EVERY_MS = 10 * 60_000
+let backupSignature = ''
+
+async function recoveryEntropy($: EngineInterface): Promise<Uint8Array> {
+  const saved = await $.store.get('recovery')
+  return typeof saved === 'string' ? unb64(saved) : keys!.secretKey
+}
+
+const recoveryWords = async ($: EngineInterface) => toWords(await recoveryEntropy($))
+
+async function restoreFromWords($: EngineInterface, text: string): Promise<string> {
+  const entropy = fromWords(text)
+  if (!entropy) return t('restoreBadWords')
+  const id = b64(nacl.box.keyPair.fromSecretKey(keysFromEntropy(entropy).secretKey).publicKey)
+  if (id === me) return t('restoreSame')
+  if (contacts.length && !(await confirm($, t('restoreConfirm'), t('restoreYes')))) return t('linkCancelled')
+  await resetAccount($, entropy)
+  return t('restoreDone')
+}
+
+async function expandPath($: EngineInterface, path: string): Promise<string> {
+  const p = path.trim()
+  if (!p.startsWith('~')) return p
+  const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''
+  return home + p.slice(1)
+}
+
+const backupFile = (dir: string) => dir.replace(/\/+$/, '') + '/buddy-chat-' + hex(nacl.hash(encode(me))).slice(0, 12) + '.backup'
+
+// The backup is the same snapshot a linked device gets, sealed with a key from the secret key.
+async function writeBackup($: EngineInterface): Promise<string> {
+  const dir = await $.store.get('backupDir')
+  if (typeof dir !== 'string' || !dir) return t('backupOff')
+  const snapshot = {
+    v: 1, secretKey: await $.store.get('secretKey'), kemSeed: await $.store.get('kemSeed'), recovery: await $.store.get('recovery'),
+    lastSeen: await $.store.get('lastSeen'), lang, ...currentState(), inbox: [...inbox],
+  }
+  const nonce = nacl.randomBytes(24)
+  const box = nacl.secretbox(encode(JSON.stringify(snapshot)), nonce, backupKey(keys!.secretKey))
+  try {
+    await $.fs.write(backupFile(dir), JSON.stringify({ v: 1, kind: 'buddy-chat-backup', id: me, nonce: b64(nonce), box: b64(box) }))
+  } catch (err) {
+    return t('backupFailed', { error: String(err) })
+  }
+  await $.store.set('backupAt', await $.clock.now())
+  return t('backupWritten', { path: backupFile(dir) })
+}
+
+async function setBackupDir($: EngineInterface, path: string): Promise<string> {
+  if (!path.trim()) {
+    await $.store.delete('backupDir')
+    $.ui.invalidate('ui.render')
+    return t('backupOff')
+  }
+  await $.store.set('backupDir', await expandPath($, path))
+  backupSignature = ''
+  const result = await writeBackup($)
+  $.ui.invalidate('ui.render')
+  return result
+}
+
+// Runs on the polling session: a backup when something changed and the last one is old enough.
+async function backupIfDue($: EngineInterface, now: number) {
+  const dir = await $.store.get('backupDir')
+  if (typeof dir !== 'string' || !dir) return
+  const at = Number(await $.store.get('backupAt')) || 0
+  if (now - at < BACKUP_EVERY_MS || signature === backupSignature) return
+  backupSignature = signature
+  await writeBackup($)
+}
+
+async function loadBackup($: EngineInterface, path: string): Promise<string> {
+  let file: { v?: number; kind?: string; id?: string; nonce?: string; box?: string }
+  try { file = JSON.parse(await $.fs.read(await expandPath($, path))) } catch { return t('backupUnreadable') }
+  if (file?.kind !== 'buddy-chat-backup' || typeof file.nonce !== 'string' || typeof file.box !== 'string') return t('backupUnreadable')
+  if (file.id !== me) return t('backupOtherAccount')
+  let plain: Uint8Array | null = null
+  try { plain = nacl.secretbox.open(unb64(file.box), unb64(file.nonce), backupKey(keys!.secretKey)) } catch { plain = null }
+  if (!plain) return t('backupUnreadable')
+  let snapshot: unknown
+  try { snapshot = JSON.parse(new TextDecoder().decode(plain)) } catch { return t('backupUnreadable') }
+  return (await applySnapshot($, snapshot, true)) ? t('backupLoaded') : t('backupUnreadable')
 }
 
 const isOnScreen = (conv: string) => threadOpen && selected === conv
@@ -1285,6 +1389,9 @@ async function refresh($: EngineInterface, quiet = false) {
   linked = (await $.store.get('linked')) === true
   gone = numberMap(await $.store.get('gone'))
   stateAt = { blocked: 0, profile: 0, muted: 0, privacy: 0, ...numberMap(await $.store.get('stateAt')) }
+  const savedDir = await $.store.get('backupDir')
+  backupDir = typeof savedDir === 'string' ? savedDir : ''
+  backupAt = Number(await $.store.get('backupAt')) || 0
   const savedStatus = await $.store.get('linkStatus')
   const nextStatus = typeof savedStatus === 'string' ? savedStatus : ''
   if (nextStatus !== linkStatus) {
@@ -1460,6 +1567,7 @@ async function tick($: EngineInterface) {
       }
       await $.store.set('activeAt', now)
       await retryUnconfirmed($)
+      await backupIfDue($, now)
     })
   } catch {
     // tries again on the next tick
@@ -1825,8 +1933,13 @@ async function loadIdentity($: EngineInterface) {
     try { keys = nacl.box.keyPair.fromSecretKey(unb64(saved)) } catch { keys = undefined }
   }
   if (!keys) {
-    keys = nacl.box.keyPair()
+    // A new identity grows from 16 bytes, so 12 recovery words bring it back.
+    const entropy = nacl.randomBytes(16)
+    const derived = keysFromEntropy(entropy)
+    keys = nacl.box.keyPair.fromSecretKey(derived.secretKey)
     await $.store.set('secretKey', b64(keys.secretKey))
+    await $.store.set('kemSeed', b64(derived.kemSeed))
+    await $.store.set('recovery', b64(entropy))
   }
   me = b64(keys.publicKey)
 
@@ -1918,6 +2031,7 @@ async function registerCommands($: EngineInterface) {
   await $.command.register({ name: 'buddy-group', description: t('cmdGroup'), argumentHint: t('cmdGroupHint') })
   await $.command.register({ name: 'buddy-lang', description: t('cmdLang'), argumentHint: t('cmdLangHint') })
   await $.command.register({ name: 'buddy-link', description: t('cmdLink'), argumentHint: t('cmdLinkHint') })
+  await $.command.register({ name: 'buddy-backup', description: t('cmdBackup'), argumentHint: t('cmdBackupHint') })
 }
 
 export const register: Register = on => {
@@ -2013,6 +2127,16 @@ export const register: Register = on => {
     // A device that already has contacts is the one that takes a code, not the one that makes it.
     if (contacts.length) return { text: t('linkHowTo') }
     return { text: await startLink($) }
+  })
+
+  // Recovery words never go through a command: what is typed at the prompt lands in the transcript.
+  on('command.run', { command: 'buddy-backup' }, async ($, e) => {
+    const args = e.args.trim()
+    if (!args) return { text: backupDir ? t('backupOn', { path: backupDir, when: backupAt ? shortWhen(backupAt, await $.clock.now()) : t('backupNever') }) : t('usageBackup') }
+    if (args === 'off') return { text: await setBackupDir($, '') }
+    if (args === 'now') return { text: await writeBackup($) }
+    if (args.startsWith('load ')) return { text: await loadBackup($, args.slice(5)) }
+    return { text: await setBackupDir($, args) }
   })
 
   on('command.run', { command: 'buddy-list' }, async () => {
@@ -2301,6 +2425,59 @@ export const register: Register = on => {
         )}
       </Box>)
 
+    const recoveryCard = card('recovery-card', <Text weight="semibold">{t('recoveryTitle')}</Text>,
+      <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
+        <Text dimColor size="footnote">{t('recoveryHint')}</Text>
+        {shownWords.length
+          ? (
+            <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
+              <Text color="warning" size="caption">{t('recoveryWarn')}</Text>
+              <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+                {shownWords.map((w, i) => <Box key={'word-' + i} width={16}><Text mono>{String(i + 1).padStart(2, ' ') + '. ' + w}</Text></Box>)}
+              </Box>
+              <Button key="words-hide" label={t('recoveryHide')} plain={graphic ? undefined : true} onPress={() => { shownWords = []; redraw() }} />
+            </Box>
+          )
+          : (
+            <Button key="words-show" label={t('recoveryShow')} plain={graphic ? undefined : true}
+              onPress={async () => {
+                if (!(await confirm($, t('recoveryConfirm'), t('recoveryConfirmYes')))) return
+                shownWords = await recoveryWords($)
+                redraw()
+              }} />
+          )}
+        {Input && (
+          <Input key={'restore-words' + (restoreSeq ? '-' + restoreSeq : '')} placeholder={t('restorePlaceholder')} value="" submitLabel={t('restoreSubmit')}
+            onSubmit={async (value: string) => {
+              toast(await restoreFromWords($, value))
+              restoreSeq++
+              redraw()
+            }} />
+        )}
+        <Text weight="semibold">{t('backupTitle')}</Text>
+        <Text dimColor size="footnote">
+          {backupDir ? t('backupOn', { path: backupDir, when: backupAt ? shortWhen(backupAt, now) : t('backupNever') }) : t('backupHint')}
+        </Text>
+        {Input && (
+          <Input key="backup-dir" placeholder={t('backupPlaceholder')} value={backupDir} submitLabel={t('save')}
+            onSubmit={async (value: string) => toast(await setBackupDir($, value))} />
+        )}
+        {backupDir && (
+          <Box flexDirection="row" columnGap={graphic ? 1 : 2}>
+            <Button key="backup-now" label={t('backupNow')} plain={graphic ? undefined : true} onPress={async () => toast(await writeBackup($))} />
+            <Button key="backup-off" label={t('backupTurnOff')} plain dimColor onPress={async () => toast(await setBackupDir($, ''))} />
+          </Box>
+        )}
+        {Input && (
+          <Input key={'backup-load' + (restoreSeq ? '-' + restoreSeq : '')} placeholder={t('backupLoadPlaceholder')} value="" submitLabel={t('backupLoadSubmit')}
+            onSubmit={async (value: string) => {
+              toast(await loadBackup($, value))
+              restoreSeq++
+              redraw()
+            }} />
+        )}
+      </Box>)
+
     const stepTitle = (n: number, title: string, done: boolean) => (
       <Box flexDirection="row" columnGap={1} alignItems="center">
         <Text weight="bold" color={done ? 'success' : 'claude'}>{done ? '✓' : n + '.'}</Text>
@@ -2466,6 +2643,7 @@ export const register: Register = on => {
             </Box>
           )}
           {devicesCard}
+          {recoveryCard}
           {footer}
         </Box>
       )

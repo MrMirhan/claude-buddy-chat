@@ -14,6 +14,7 @@ buddy-chat bir Claude Code [mod'u](https://code.claude.com/docs/en/plugins/mods/
 - Kendi mesajını herkesten düzenleme ve silme; her mesajı kopyalama
 - Mesaj durumları: gönderiliyor ◷, gönderildi ✓, iletildi ✓✓, okundu (mavi ✓✓)
 - Birebir sohbetlerde "yazıyor…" göstergesi
+- Format sonrası hesabını geri getiren kurtarma kelimeleri (12; 0.17'den önce oluşan hesaplarda 24) ve isteğe bağlı, bilgisayarındaki bir klasöre şifreli yedek
 - Birden çok bilgisayarda tek hesap: cihaz bağla, mesajlar ve ayarlar cihazların arasında eşitlensin
 - Onaylanmayan mesajlar 7 güne kadar yeniden gönderilir; 12 saatten uzun ortada olmayan arkadaşa da ulaşır
 - Okundu bilgisi ve yazıyor göstergesi için gizlilik ayarları. Okundu bilgisi kapalıyken ne gönderirsin ne görürsün.
@@ -119,6 +120,7 @@ Panel her yüzeyde aynı, ama her uygulama kendi görünümüyle çizer.
 | `/buddy-send <kişi ya da grup> <mesaj>` | Mesaj gönder |
 | `/buddy-group <ad> <kişi1> [kişi2 ...]` | Grup kur |
 | `/buddy-lang <en ya da tr>` | Dili ayarla |
+| `/buddy-backup [klasör \| off \| now \| load <dosya>]` | Şifreli yerel yedeği aç, kapat, şimdi yedekle ya da bir yedek yükle |
 | `/buddy-link [kod]` | Kodsuz: yeni cihazda bir kod göster. Kodla: o cihazı hesabına bağla |
 
 Bir kişiyi takma adıyla, görünen adıyla ya da `@kullanıcıadı` ile anabilirsin.
@@ -147,12 +149,19 @@ Varsayılan dil İngilizce. Türkçe için `/buddy-lang tr` çalıştır ya da *
 - **Bağlı cihazlar.** Yeni cihazda **Kişiler → Cihazlar → Yeni cihaz bu**'yu seç (ya da `/buddy-link` çalıştır). Kodu hesabının olduğu cihaza yapıştır. O cihaz anahtarlarını, kişilerini, gruplarını, ayarlarını ve son mesajlarını koddan türeyen bir anahtarla şifreler ve sadece kodun bildiği bir topic'e bırakır. Yeni cihaz bunları açar ve aynı kimliği kullanır. Sonrasında her cihaz değişenlerin (gönderilen mesajlar, düzenlemeler, kişiler, ayarlar) şifreli bir kopyasını kendi topic'ine bırakır. 5 dakikadan uzun ortada olmayan bir cihaz kaçırdıklarını diğerlerinden ister. ML-KEM el sıkışmalarını kimliği ilk oluşturan cihaz yapar; iki cihaz yapsa iki farklı anahtar çıkar.
 - **Cihaz yönetimi.** **Kişiler → Cihazlar** bağlı cihazları bilgisayar adıyla listeler; ana cihazı ve her birinin son görülme zamanını gösterir. Ana cihazda **Çıkar**, diğer cihazdan hesabı silmesini ister; cihaz bunu bir sonraki çevrimiçi olduğunda yapar. Bağlı bir cihazda **Bu cihazı ayır**, oradaki hesabı siler ve yeni bir kimlikle baştan başlar.
 
+## Kurtarma ve yedek
+
+**Kişiler → Kurtarma ve yedek**, bir onaydan sonra kurtarma kelimelerini gösterir. Onları kâğıda yaz. Yeni ya da formatlanmış bir bilgisayarda aynı karta yaz; Buddy ID'n geri gelir, arkadaşların seni kaybetmez. 0.17 ve sonrasında oluşan hesapların 12 kelimesi var; daha eski hesapların anahtarı kelimelerden üretilmediği için 24 kelimesi var. Kelimeler hiçbir komuttan geçmez, çünkü isteme yazılan her şey konuşma kaydında kalır.
+
+Kelimeler kişileri ve mesajları içermez. Onlar için aynı kartta ya da `/buddy-backup <klasör>` ile bir yedek klasörü seç. buddy-chat bir şey değiştiyse 10 dakikada bir oraya `buddy-chat-<id>.backup` yazar. Dosya gizli anahtarından türeyen bir anahtarla şifrelenir; sadece kurtarma kelimelerin açar. Geri yüklemeden sonra dosyayı kartta ya da `/buddy-backup load <dosya>` ile yükle. Klasör seçene kadar yedek kapalıdır. Bir bulut sürücünün eşitlediği klasör de olur.
+
 ## Güvenlik sınırları
 
 - **Forward secrecy yok.** Signal'deki Double Ratchet gibi bir mekanizma yok. Gizli anahtarların bilgisayarından çalınırsa ntfy.sh'ta hâlâ duran mesajlar, yani en fazla son 12 saatinkiler, çözülebilir.
 - **Üst veri görünür.** ntfy.sh hangi topic'e ne zaman, hangi IP'den, ne büyüklükte mesaj geldiğini görür.
 - **Üçüncü taraf kod.** TweetNaCl.js Cure53 tarafından denetlendi. noble-post-quantum bağımsız denetimden geçmedi, sadece yazarı denetledi. buddy-chat ikisini birlikte bu yüzden kullanıyor.
 - **Denetlenmedi.** buddy-chat'in kendisi güvenlik denetiminden geçmedi.
+- **Kurtarma kelimeleri hesabının kendisidir.** Onlara sahip olan mesajlarını okuyup gönderebilir ve yedeklerini açabilir.
 - **Bağlama kodu hesabının kendisidir.** Kodu 10 dakikalık süresi içinde ele geçiren ve relay'i 12 saat içinde okuyan biri anlık görüntüyü açabilir. Kodu sadece kendine gönder. Bağlı cihazlar tek kimliği paylaşır. **Çıkar**, diğer cihazın yerine getirdiği bir istektir: bunu yok sayacak şekilde değiştirilmiş bir cihaz anahtarları tutar. Anahtarları geri almanın tek yolu, arkadaşlarının yeniden eklemesi gereken yeni bir kimliktir.
 
 ## Sınırlar

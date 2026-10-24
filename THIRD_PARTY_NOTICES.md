@@ -16,3 +16,10 @@ buddy-chat includes the code below in `hooks/vendor/`. Each part keeps its own l
 - Sources: https://github.com/paulmillr/noble-post-quantum (version 0.7.1) and https://github.com/paulmillr/noble-hashes (version 2.4.0)
 - License: MIT. Copyright (c) 2024 Paul Miller (https://paulmillr.com). Full text: `hooks/vendor/LICENSE-noble`
 - Changes: none to the code; only the parts that ML-KEM-768 needs are bundled.
+
+## scure-bip39 wordlist
+
+- File: `hooks/vendor/bip39-english.js` (the English BIP39 wordlist from `wordlists/english.js`, version 2.4.0)
+- Source: https://github.com/paulmillr/scure-bip39
+- License: MIT. Copyright (c) 2022 Patricio Palladino, Paul Miller (paulmillr.com). Full text: `hooks/vendor/LICENSE-scure-bip39`
+- Changes: none.
