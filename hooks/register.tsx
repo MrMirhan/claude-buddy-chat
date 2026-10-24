@@ -88,6 +88,8 @@ let view: 'chats' | 'people' = 'chats'
 let selected = ''
 let renaming = ''
 let threadOpen = false
+let editingProfile = false
+let lineCopied = false
 let editing = ''
 let session = ''
 let polling = false
@@ -909,6 +911,7 @@ export const register: Register = on => {
     view = 'chats'
     selected = editing = renaming = ''
     threadOpen = false
+    editingProfile = false
     await migrate($)
     await loadIdentity($)
     await refresh($)
@@ -1084,68 +1087,85 @@ export const register: Register = on => {
       </Box>
     )
 
+    // Fields carry no side label: labels of different lengths left the boxes out of line.
     const addInput = Input
-      ? <Input key="add-contact" label={t('addContactLabel')} placeholder={t('addContactPlaceholder')} value="" submitLabel={t('addSubmit')}
+      ? <Input key="add-contact" placeholder={t('addContactPlaceholder')} value="" submitLabel={t('addSubmit')}
           onSubmit={async (value: string) => {
             const parsed = parseAddLine(value)
             toast(parsed ? await addContact($, parsed.id, parsed.nickname) : t('addLineUnknown'))
           }} />
       : <Text dimColor>{t('addHintNoInput')}</Text>
 
-    const copyButtons = (
-      <Box flexDirection="row" columnGap={graphic ? 1 : 2} flexWrap="wrap">
+    const shareRow = (
+      <Box flexDirection="row" columnGap={graphic ? 1 : 2} alignItems="center" flexWrap="wrap">
         <Button key="copy-line" label={t('copyLine')} plain={graphic ? undefined : true} variant={graphic ? 'primary' : undefined}
-          hotkey="c" onPress={press => copy(addLine(), press.surface, t('copiedLine'))} />
-        <Button key="copy-id" label={t('copyId')} plain={graphic ? undefined : true} dimColor={graphic ? undefined : true}
+          hotkey="c" onPress={async press => { await copy(addLine(), press.surface, t('copiedLine')); lineCopied = true; redraw() }} />
+        <Button key="copy-id" label={t('copyId')} plain={graphic ? undefined : true} dimColor
           onPress={press => copy(me, press.surface, t('copiedId'))} />
+        <Text dimColor mono size="caption">{t('idShort', { id: shortId(me) })}</Text>
       </Box>
     )
 
-    const myCard = graphic
+    const profileEditor = Input
       ? (
-        <Box flexDirection="column" borderStyle="round" borderColor="claude" padding="md" rowGap={1}>
-          <Box flexDirection="row" columnGap={2} alignItems="center">
-            {avatar('me', profile.displayName || profile.username || '?', ME_COLOR, 48)}
-            <Box flexDirection="column" flexGrow={1}>
-              <Text size="title" weight="semibold">{profile.displayName || t('setName')}</Text>
-              <Text dimColor>{profile.username ? '@' + profile.username : t('noUsername')}</Text>
-            </Box>
-          </Box>
-          <Text mono size="caption" dimColor wrap="truncate-middle">{me}</Text>
-          <Text size="caption" color="success">{t('e2eBadge')}</Text>
-          {copyButtons}
+        <Box flexDirection="column">
+          <Input key="display-name" placeholder={t('namePlaceholderFull')} value={profile.displayName} submitLabel={t('save')}
+            autoFocus={!profile.displayName ? true : undefined}
+            onSubmit={async (value: string) => { if (value.trim()) toast(await setProfile($, { displayName: value })) }} />
+          <Input key="username" placeholder={t('usernamePlaceholderFull')} value={profile.username} submitLabel={t('save')}
+            onSubmit={async (value: string) => {
+              const username = cleanUsername(value)
+              toast(username ? await setProfile($, { username }) : t('usernameRule'))
+            }} />
+          {editingProfile && (
+            <Button key="profile-done" label={t('done')} plain={graphic ? undefined : true} onPress={() => { editingProfile = false; redraw() }} />
+          )}
         </Box>
       )
-      : (
-        <Box flexDirection="column" borderStyle="round" borderColor="claude" paddingX={1}>
-          <Box flexDirection="row" justifyContent="space-between" flexWrap="wrap">
-            <Text weight="bold">{profile.displayName || t('setName')}{profile.username ? <Text dimColor> @{profile.username}</Text> : ''}</Text>
-            <Text dimColor>X25519 + ML-KEM-768</Text>
-          </Box>
-          <Text dimColor wrap="truncate-middle">{me}</Text>
-          {copyButtons}
-        </Box>
-      )
+      : <Text dimColor>{t('usageName')}</Text>
 
-    const profileInputs = Input && (
-      <Box flexDirection="column">
-        <Input key="display-name" label={t('nameLabel')} placeholder={profile.displayName || t('namePlaceholder')} value="" submitLabel={t('save')}
-          onSubmit={async (value: string) => { if (value.trim()) toast(await setProfile($, { displayName: value })) }} />
-        <Input key="username" label={t('usernameLabel')} placeholder={profile.username ? '@' + profile.username : t('usernamePlaceholder')} value=""
-          submitLabel={t('save')}
-          onSubmit={async (value: string) => {
-            const username = cleanUsername(value)
-            toast(username ? await setProfile($, { username }) : t('usernameRule'))
-          }} />
+    const profileSummary = (
+      <Box flexDirection="row" columnGap={graphic ? 2 : 1} alignItems="center">
+        {avatar('me', profile.displayName || profile.username || '?', ME_COLOR, 44)}
+        <Box flexDirection={graphic ? 'column' : 'row'} columnGap={1} flexGrow={1} flexShrink={1}>
+          <Text size="heading" weight="semibold">{profile.displayName}</Text>
+          <Text dimColor size="caption">{profile.username ? '@' + profile.username : t('noUsername')}</Text>
+        </Box>
+        <Button key="edit-profile" label={t('editProfile')} plain={graphic ? undefined : true} dimColor={graphic ? undefined : true}
+          onPress={() => { editingProfile = true; redraw() }} />
       </Box>
     )
+
+    const profileBlock = editingProfile || !profile.displayName ? profileEditor : profileSummary
 
     const languagePicker = (
-      <Box flexDirection="row" columnGap={graphic ? 1 : 2} alignItems="center" flexWrap="wrap">
-        <Text dimColor>{t('languageLabel')}</Text>
-        {LANGS.map(l => graphic
-          ? <Button key={'lang-' + l} label={LANG_NAMES[l]} variant={l === lang ? 'primary' : 'secondary'} onPress={() => setLang($, l)} />
-          : <Button key={'lang-' + l} label={LANG_NAMES[l]} plain dimColor={l !== lang} onPress={() => setLang($, l)} />)}
+      <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
+        <Text dimColor size="caption">{t('languageLabel')}</Text>
+        {LANGS.map(l => (
+          <Button key={'lang-' + l} label={LANG_NAMES[l]} plain dimColor={l !== lang} onPress={() => setLang($, l)} />
+        ))}
+      </Box>
+    )
+
+    const footer = (
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" columnGap={2}>
+        <Text dimColor size="caption">{t('e2eBadge')}</Text>
+        {languagePicker}
+      </Box>
+    )
+
+    const card = (key: string, title: RenderChildren, body: RenderChildren, color = 'inactive') => (
+      <Box key={key} flexDirection="column" borderStyle="round" borderColor={color}
+        padding={graphic ? 'md' : undefined} paddingX={graphic ? undefined : 1} rowGap={graphic ? 1 : 0}>
+        {title}
+        {body}
+      </Box>
+    )
+
+    const stepTitle = (n: number, title: string, done: boolean) => (
+      <Box flexDirection="row" columnGap={1} alignItems="center">
+        <Text weight="bold" color={done ? 'success' : 'claude'}>{done ? '✓' : n + '.'}</Text>
+        <Text weight="semibold" size={graphic ? 'heading' : undefined}>{title}</Text>
       </Box>
     )
 
@@ -1176,10 +1196,8 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" rowGap={1}>
           {header}
-          {myCard}
-          {profileInputs}
-          {languagePicker}
-          {addInput}
+          {card('me-card', profileBlock, shareRow, 'claude')}
+          {card('add-card', <Text weight="semibold">{t('addContactLabel')}</Text>, addInput)}
 
           {incoming.length > 0 && (
             <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
@@ -1296,26 +1314,37 @@ export const register: Register = on => {
                 actions({ key: 'unblock-' + id, label: t('unblock'), onPress: () => unblock($, id) })))}
             </Box>
           )}
+          {footer}
         </Box>
       )
     }
 
     if (!current) {
+      const named = !!profile.displayName
       return (
         <Box flexDirection="column" rowGap={1}>
           {header}
-          <Text weight="bold" size="title">{t('welcomeTitle')}</Text>
           <Box flexDirection="column">
-            <Text>{t('welcome1')}</Text>
-            <Text>{t('welcome2')}</Text>
-            <Text>{t('welcome3')}</Text>
+            <Text weight="bold" size="title">{t('welcomeTitle')}</Text>
+            <Text dimColor>{t('welcomeSub')}</Text>
           </Box>
-          {myCard}
-          {!profile.displayName && profileInputs}
-          {addInput}
-          {languagePicker}
-          {incoming.length > 0 && <Text color="warning">{t('requestsWaiting', { count: incoming.length })}</Text>}
-          {outgoing.length > 0 && <Text dimColor>{t('outgoingWaiting', { count: outgoing.length })}</Text>}
+          {incoming.length > 0 && (
+            <Button key="go-requests" label={t('requestsButton', { count: incoming.length })} variant="primary" plain={graphic ? undefined : true}
+              onPress={() => { view = 'people'; redraw() }} />
+          )}
+          {card('step-profile', stepTitle(1, t('stepProfile'), named && !editingProfile), profileBlock, named && !editingProfile ? 'success' : 'claude')}
+          {card('step-share', stepTitle(2, t('stepShare'), lineCopied),
+            <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
+              <Text dimColor size="footnote">{t('shareHint')}</Text>
+              {shareRow}
+            </Box>, lineCopied ? 'success' : named ? 'claude' : 'inactive')}
+          {card('step-add', stepTitle(3, t('stepAdd'), outgoing.length > 0),
+            <Box flexDirection="column" rowGap={graphic ? 1 : 0}>
+              <Text dimColor size="footnote">{t('addHint')}</Text>
+              {addInput}
+              {outgoing.length > 0 && <Text dimColor size="caption">{t('outgoingWaiting', { count: outgoing.length })}</Text>}
+            </Box>, outgoing.length > 0 ? 'success' : lineCopied ? 'claude' : 'inactive')}
+          {footer}
         </Box>
       )
     }

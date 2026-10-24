@@ -474,3 +474,31 @@ test('the language switches between English and Turkish, and system lines follow
   await w.clock.advance(8000)
   expect(w.notes).toEqual(['Ahmet seni arkadaşlıktan çıkardı'])
 })
+
+test('onboarding: name form until a name is saved, then a summary with Edit; steps tick as they are done', async ($, on) => {
+  const w = setup(on, { version: 4 })
+  await start($)
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const ui = await $.ui.mount(pane(surface))
+    expect(await ui.find({ key: 'display-name' })).not.toBeUndefined()
+    expect(await ui.find({ key: 'edit-profile' })).toBeUndefined()
+    await ui.unmount()
+  }
+
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.input({ key: 'display-name', text: 'Deniz Kaya' })
+  expect(await ui.find({ key: 'display-name' })).toBeUndefined()
+  expect(await ui.find({ key: 'edit-profile' })).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Deniz Kaya$/ })).not.toBeUndefined()
+
+  await ui.press({ key: 'copy-line' })
+  expect((await ui.find({ type: 'Text', text: /Share your add line/ }))).not.toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^✓$/ })).not.toBeUndefined()
+
+  await ui.press({ key: 'edit-profile' })
+  expect(await ui.find({ key: 'username' })).not.toBeUndefined()
+  await ui.press({ key: 'profile-done' })
+  expect(await ui.find({ key: 'username' })).toBeUndefined()
+  await ui.unmount()
+  expect(w.posts.length).toBe(0)
+})
