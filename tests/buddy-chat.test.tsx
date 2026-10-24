@@ -674,3 +674,23 @@ test('desktop: the chat fills the pane height and pages through older and newer 
   expect(await ui.find({ key: 'newer' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('a wheel or arrow scroll over a chat pages its messages and holds the pane at the top', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const conv = 'dm:' + idOf(ahmet)
+  const inbox = Array.from({ length: 60 }, (_, i) =>
+    ({ key: 'w' + i, conv, from: idOf(ahmet), name: 'A', text: 'teker ' + i, at: (i + 1) * 1000, mine: false }))
+  const offsets: number[] = []
+  on('ui.scroll', (_, e) => { offsets.push((e as { offset: number }).offset); return {} as never })
+  setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
+  await start($)
+  const ui = await $.ui.mount(pane('terminal'))
+  expect(await ui.find({ type: 'Text', text: /^teker 59$/ })).not.toBeUndefined()
+
+  await $.ui.scroll({ component: 'Pane', requestId: 'buddy-chat', offset: 0, by: -3, bodyRows: 40, contentRows: 41, origin: { kind: 'person' } } as never)
+  await ui.redraw()
+  expect(offsets.at(-1)).toBe(0)
+  expect(await ui.find({ type: 'Text', text: /^teker 59$/ })).toBeUndefined()
+  expect((await ui.find({ key: 'newer' }))?.text).toContain('3')
+  await ui.unmount()
+})

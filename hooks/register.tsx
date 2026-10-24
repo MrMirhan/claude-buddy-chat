@@ -103,7 +103,8 @@ let cursor = ''
 // newerSkip is how many of the newest messages sit below the window (0 shows the newest); hiddenAbove, how many above it.
 let newerSkip = 0
 let hiddenAbove = 0
-const GRAPHIC_WINDOW = 60
+// Set while a chat is drawn: the ui.scroll hook then turns the scroll into paging.
+let chatShown = false
 const PAGE_STEP = 8
 
 const composeKey = (conv: string) => 'compose-' + conv + (composeSeq ? '-' + composeSeq : '')
@@ -1074,11 +1075,13 @@ export const register: Register = on => {
     return { result: (await sendText($, conv.id, text)).text }
   })
 
+  // The chat is drawn one row taller than the pane, so the wheel, the arrows and the page keys raise ui.scroll.
+  // The pane is held at the top and the scroll moves the messages instead: a wheel notch or an arrow by one, a page key by a page.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
-    const result = await next(e)
-    // The chat fills the pane, so a wheel or arrow scroll over it pages the messages instead.
-    if (threadOpen && e.by !== 0) pageBy($, e.by < 0 ? 3 : -3)
-    return result
+    if (!chatShown || e.by === 0) return next(e)
+    const step = Math.min(PAGE_STEP, Math.max(1, Math.round(Math.abs(e.by))))
+    pageBy($, e.by < 0 ? step : -step)
+    return next({ ...e, offset: 0 })
   })
 
   // A Desktop chat row posts { open } when it is clicked anywhere.
@@ -1098,6 +1101,8 @@ export const register: Register = on => {
     const Svg = graphic && 'Svg' in els ? els.Svg : undefined
     const Client = e.surface === 'desktop' && 'Client' in els ? els.Client : undefined
     const cols = Math.max(20, e.props.bodyColumns)
+    // Set again below only when a chat is drawn, so People and the list keep their own scrolling.
+    chatShown = false
     // The rows the pane gives its body: the chat is drawn this tall so it never scrolls the list and the header away.
     const fullHeight = e.props.scroll?.bodyRows || undefined
     const now = await $.clock.now()
@@ -1555,38 +1560,44 @@ export const register: Register = on => {
       .map(x => x.m)
     const editTarget = thread.find(m => m.key === editing && m.mine && !m.deleted)
     const end = Math.max(0, thread.length - newerSkip)
-    // Terminal rows are cells, so the rows each message takes can be counted and the window holds exactly what fits.
-    // Desktop draws in pixels, so it takes a generous slice and clips what does not fit at the top.
-    const lineWidth = Math.max(10, cols - 8)
+    // The window holds what fits between the header and the composer. Terminal rows are cells, so the count is exact;
+    // Desktop draws in pixels, so it is an estimate, a few more are drawn, and the window clips any overflow at the top.
+    const lineWidth = Math.max(10, graphic ? Math.floor(cols * (split ? 0.5 : 0.75)) : cols - 8)
     const linesOf = (text: string) => text.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / lineWidth)), 0)
     const rowsOf = (m: Msg, prev: Msg | undefined) => {
       const newDay = !prev || !sameDay(prev.at, m.at)
       const sameRun = !!prev && !newDay && !prev.system && !m.system && prev.from === m.from && m.at - prev.at < 5 * 60_000
-      // An incoming message's quote bar adds a blank row above and below it.
-      return (newDay ? 1 : 0) + (m.system || sameRun ? 0 : 1) + linesOf(textOf(m)) + (m.system || m.mine ? 0 : 2)
+      const lines = linesOf(textOf(m))
+      // Desktop: a bubble adds its time row and padding, a day pill its margins.
+      if (graphic) return (newDay ? 3 : 0) + (m.system ? 1 : lines + 3) + (!m.mine && group && !sameRun ? 1 : 0)
+      // Terminal: an incoming message's quote bar adds a blank row above and below it.
+      return (newDay ? 1 : 0) + (m.system || sameRun ? 0 : 1) + lines + (m.system || m.mine ? 0 : 2)
     }
     const chipRows = Math.ceil(convs.reduce((n, c) => n + c.title.length + 6, 0) / cols)
-    const room = Math.max(4, (fullHeight ?? 24) - 11 - chipRows)
-    let start = graphic ? Math.max(0, end - GRAPHIC_WINDOW) : end
-    if (!graphic) {
-      let used = 0
-      while (start > 0) {
-        const rowsNeeded = rowsOf(thread[start - 1]!, thread[start - 2])
-        if (used + rowsNeeded > room && start < end) break
-        used += rowsNeeded
-        start--
-      }
+    const room = Math.max(4, (fullHeight ?? 24) - (graphic ? 9 : 11 + chipRows))
+    let start = end
+    let used = 0
+    while (start > 0) {
+      const rowsNeeded = rowsOf(thread[start - 1]!, thread[start - 2])
+      if (used + rowsNeeded > room && start < end) break
+      used += rowsNeeded
+      start--
     }
-    const visible = thread.slice(start, end)
+    hiddenAbove = start
+    const drawFrom = graphic ? Math.max(0, start - 2) : start
+    const visible = thread.slice(drawFrom, end)
     const below = thread.length - end
-    hiddenAbove = graphic ? Math.max(0, end - 1) : start
-    // On Desktop the window clips older messages at the top, so how many are out of sight is not known: offer older ones while any exist.
-    const olderButton = (graphic ? end > PAGE_STEP : start > 0) && (
+    // At the start of the chat the messages hang from the top, so going back never opens a gap above them.
+    const align = drawFrom === 0 && newerSkip > 0 ? 'flex-start' : 'flex-end'
+    chatShown = view === 'chats' && (!graphic || threadOpen)
+    const olderButton = start > 0 && (
       <Box justifyContent="center">
-        <Button key="older" label={graphic ? t('olderPage') : t('olderMessages', { count: start })} plain dimColor
+        <Button key="older" label={t('olderMessages', { count: start })} plain dimColor
           hotkey={graphic ? undefined : 'o'} onPress={() => pageBy($, PAGE_STEP)} />
       </Box>
     )
+    // The pane is held at offset 0, so this row is never seen; it only lets the pane scroll by one row.
+    const scrollRow = fullHeight ? <Box key="scroll-row" height={1} /> : null
     const newerButton = below > 0 && (
       <Box justifyContent="center">
         <Button key="newer" label={t('newerMessages', { count: below })} plain dimColor onPress={() => pageBy($, -PAGE_STEP)} />
@@ -1717,7 +1728,7 @@ export const register: Register = on => {
         : <Input key={composeKey(current.id)}
             label={graphic ? undefined : '→ ' + (current.isGroup ? '# ' : '') + current.title}
             placeholder={t('composePlaceholder', { title: (current.isGroup ? '# ' : '') + current.title })} value="" submitLabel={t('send')}
-            autoFocus={graphic ? true : undefined}
+            autoFocus={graphic ? true : undefined} rows={graphic ? 2 : undefined}
             onSubmit={async (value: string) => {
               const r = await sendText($, current.id, value)
               if (!r.ok) toast(r.text)
@@ -1751,16 +1762,23 @@ export const register: Register = on => {
               <Text dimColor>{t('sayHi')}</Text>
             </Box>
           )}
-          <Box flexDirection="column" flexGrow={1} flexShrink={1} justifyContent="flex-end" overflow="hidden">{rowsView}</Box>
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} justifyContent={align} overflow="hidden">{rowsView}</Box>
           {newerButton}
           <Box flexDirection="column" alignItems="stretch" width="100%" marginTop={1} flexShrink={0}>{composer}</Box>
         </Box>
       )
-      if (!split) return threadPane
+      const body = split
+        ? (
+          <Box flexDirection="row" columnGap={1} height={fullHeight} overflow="hidden">
+            {sidebar}
+            {threadPane}
+          </Box>
+        )
+        : threadPane
       return (
-        <Box flexDirection="row" columnGap={1} height={fullHeight} overflow="hidden">
-          {sidebar}
-          {threadPane}
+        <Box flexDirection="column">
+          {body}
+          {scrollRow}
         </Box>
       )
     }
@@ -1784,6 +1802,7 @@ export const register: Register = on => {
 
     const rule = <Text dimColor>{'─'.repeat(cols)}</Text>
     return (
+      <Box flexDirection="column">
       <Box flexDirection="column" height={fullHeight} overflow="hidden">
         {header}
         <Box flexDirection="row" columnGap={2} flexWrap="wrap" marginTop={1}>
@@ -1797,7 +1816,7 @@ export const register: Register = on => {
         {rule}
         <Text dimColor wrap="truncate-end">{securityLine}</Text>
         {olderButton}
-        <Box flexDirection="column" flexGrow={1} flexShrink={1} justifyContent="flex-end" overflow="hidden">
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} justifyContent={align} overflow="hidden">
           {thread.length === 0 && <Text dimColor>{t('emptyThread')}</Text>}
           {rowsView}
         </Box>
@@ -1814,6 +1833,8 @@ export const register: Register = on => {
         </Box>
         <Text dimColor wrap="truncate-end">{t('terminalHint')}</Text>
         <Text dimColor wrap="truncate-end">{t('terminalHint2')}</Text>
+      </Box>
+      {scrollRow}
       </Box>
     )
   })
