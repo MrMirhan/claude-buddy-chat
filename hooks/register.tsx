@@ -3315,7 +3315,7 @@ export const register: Register = on => {
     })
 
     const attachButton = Input && !editTarget && (
-      <Button key="attach" label="📎" plain hotkey={graphic ? undefined : 'a'}
+      <Button key="attach" label="📎" plain={graphic ? undefined : true} hotkey={graphic ? undefined : 'a'}
         onPress={async () => {
           const r = await attachFile($, current.id)
           if (r.text && !r.ok) toast(r.text)
@@ -3435,7 +3435,7 @@ export const register: Register = on => {
               )}
             {newerButton}
             {actionBar}
-            <Box flexDirection="row" alignItems="center" columnGap={1} width="100%" flexShrink={0}>
+            <Box flexDirection="row" alignItems="flex-end" columnGap={1} width="100%" flexShrink={0}>
               {attachButton}
               <Box flexDirection="column" alignItems="stretch" flexGrow={1} flexShrink={1}>{composer}</Box>
             </Box>
