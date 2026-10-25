@@ -162,6 +162,7 @@ The words do not hold contacts or messages. For those, select **Choose a backup 
 
 - **No forward secrecy.** buddy-chat has no ratchet like Signal's Double Ratchet. If someone takes your secret keys from your machine, they can open the messages that ntfy.sh still keeps, which is up to 12 hours of messages.
 - **Metadata is visible.** ntfy.sh sees which topics get messages, when, from which IP address, and how large the messages are.
+- **Usage count.** Each install adds 1 to a public counter at abacus.jasoncameron.dev once, and 1 to that day's count on each day it runs. No ID, name or message goes with it; the service sees only the request and its IP address. Settings shows the totals, and **Usage count: off** stops it.
 - **Third-party code.** Cure53 audited TweetNaCl.js. noble-post-quantum has no independent audit; only its author audited it. This is why buddy-chat joins the two in a hybrid key.
 - **Not audited.** buddy-chat itself has had no security audit.
 - **The recovery words are your account.** Anyone who has them can read and send your messages, and can open your backups.

@@ -15,6 +15,10 @@ import type { ChatRowProps } from './chat-row.tsx'
 // Messages never reach Claude on their own: the user presses "↗" in the pane.
 
 const RELAY = 'https://ntfy.sh'
+// A public counter service: each install adds 1 once, and 1 a day while in use. Nothing else is sent.
+const COUNTER = 'https://abacus.jasoncameron.dev'
+const COUNTER_NS = 'buddy-chat-mrmirhan'
+const USAGE_TTL_MS = 3_600_000
 const PANE = 'buddy-chat'
 const WIRE_VERSION = 3
 const STORE_VERSION = 4
@@ -57,7 +61,7 @@ type Profile = { username: string; displayName: string }
 // notifications covers toasts and OS notifications; a muted chat is silenced on its own.
 // sound: 'auto' plays our chime only when the notification made no sound of its own (not sent, as in the desktop app).
 type Sound = 'auto' | 'on' | 'off'
-type Privacy = { readReceipts: boolean; typing: boolean; notifications: boolean; sound: Sound }
+type Privacy = { readReceipts: boolean; typing: boolean; notifications: boolean; sound: Sound; stats: boolean }
 type Typing = { conv: string; from: string; until: number }
 type ReceiptKind = 'delivered' | 'read'
 type Contact = {
@@ -165,7 +169,7 @@ let groups: Group[] = []
 let inbox: Msg[] = []
 let readAt: Record<string, number> = {}
 let status: Status | undefined
-let privacy: Privacy = { readReceipts: true, typing: true, notifications: true, sound: 'auto' }
+let privacy: Privacy = { readReceipts: true, typing: true, notifications: true, sound: 'auto', stats: true }
 let muted: string[] = []
 // Device linking. deviceId stays on this machine; primary: the device the identity was made on, the one that runs
 // ML-KEM encapsulation, since two devices encapsulating would agree on two different keys.
@@ -212,6 +216,8 @@ let backupAt = 0
 // No folder dialog could open here, so the card shows a field for a typed path.
 let pickerMissing = false
 let pluginVersion = ''
+let usage: { installs?: number; active?: number } = {}
+let usageAt = 0
 let groupSeq = 0
 let pollerAt = 0
 // Terminal: the message j/k marked; its actions take one key (e, x, f). Empty: no mark.
@@ -1415,7 +1421,46 @@ function cleanPrivacy(value: unknown): Privacy {
     typing: p.typing !== false,
     notifications: p.notifications !== false,
     sound: p.sound === 'on' || p.sound === 'off' ? p.sound : 'auto',
+    stats: p.stats !== false,
   }
+}
+
+const utcDay = (at: number) => new Date(at).toISOString().slice(0, 10)
+
+async function counter($: EngineInterface, action: 'hit' | 'get', key: string): Promise<number | undefined> {
+  try {
+    const res = await $.http.fetch(COUNTER + '/' + action + '/' + COUNTER_NS + '/' + key)
+    const value = res.ok ? (JSON.parse(res.text) as { value?: unknown }).value : undefined
+    return typeof value === 'number' ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// One install adds 1 to installs once, and 1 to the day's active count on each day it runs.
+async function countUsage($: EngineInterface) {
+  if (!privacy.stats) return
+  if ((await $.store.get('countedInstall')) !== true && (await counter($, 'hit', 'installs')) !== undefined) {
+    await $.store.set('countedInstall', true)
+  }
+  const day = utcDay(await $.clock.now())
+  if ((await $.store.get('countedDay')) !== day && (await counter($, 'hit', 'active-' + day)) !== undefined) {
+    await $.store.set('countedDay', day)
+  }
+}
+
+// Today's count starts low each UTC morning, so the larger of today and yesterday stands for a day's users.
+async function loadUsage($: EngineInterface) {
+  const now = await $.clock.now()
+  if (now - usageAt < USAGE_TTL_MS) return
+  usageAt = now
+  const [installs, today, yesterday] = await Promise.all([
+    counter($, 'get', 'installs'),
+    counter($, 'get', 'active-' + utcDay(now)),
+    counter($, 'get', 'active-' + utcDay(now - 86_400_000)),
+  ])
+  usage = { installs, active: today === undefined && yesterday === undefined ? undefined : Math.max(today ?? 0, yesterday ?? 0) }
+  $.ui.invalidate('ui.render')
 }
 
 const SOUND_GAP_MS = 2000
@@ -2329,6 +2374,8 @@ export const register: Register = on => {
     // Handshake with friends who have no quantum-resistant key yet, such as those updated from 0.4.
     if (primary) void (async () => { for (const f of friends()) if (!f.pq) await sendKem($, f.id) })().catch(() => {})
     void announce($).catch(() => {})
+    void countUsage($)
+    $.clock.every(6 * 3_600_000, () => countUsage($))
 
     $.clock.every(POLL_MS, () => tick($))
     // A pane is the session's: one left open in the last session opens again here, until the person closes it.
@@ -2636,6 +2683,8 @@ export const register: Register = on => {
         <Button key="toggle-sound" label={t(privacy.sound === 'on' ? 'soundOn' : privacy.sound === 'off' ? 'soundOff' : 'soundAuto')}
           plain dimColor={privacy.sound === 'off'}
           onPress={() => setPrivacy($, { sound: privacy.sound === 'auto' ? 'on' : privacy.sound === 'on' ? 'off' : 'auto' })} />
+        <Button key="toggle-stats" label={t(privacy.stats ? 'statsOn' : 'statsOff')} plain dimColor={!privacy.stats}
+          onPress={() => setPrivacy($, { stats: !privacy.stats })} />
       </Box>
     )
 
@@ -2794,6 +2843,11 @@ export const register: Register = on => {
       : header
 
     if (view === 'settings') {
+      void loadUsage($)
+      const usageLine = [
+        usage.installs !== undefined && t('usageInstalls', { count: usage.installs }),
+        usage.active !== undefined && t('usageActive', { count: usage.active }),
+      ].filter(Boolean).join(' · ')
       return (
         <Box flexDirection="column" rowGap={1}>
           {viewHeader(t('tabSettings'))}
@@ -2810,6 +2864,7 @@ export const register: Register = on => {
             {footer}
             {pluginVersion && <Text dimColor size="caption">{'buddy-chat ' + pluginVersion}</Text>}
           </Box>
+          {usageLine && <Text dimColor size="caption">{usageLine}</Text>}
         </Box>
       )
     }

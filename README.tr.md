@@ -162,6 +162,7 @@ Kelimeler kişileri ve mesajları içermez. Onlar için aynı karttaki **Yedek k
 
 - **Forward secrecy yok.** Signal'deki Double Ratchet gibi bir mekanizma yok. Gizli anahtarların bilgisayarından çalınırsa ntfy.sh'ta hâlâ duran mesajlar, yani en fazla son 12 saatinkiler, çözülebilir.
 - **Üst veri görünür.** ntfy.sh hangi topic'e ne zaman, hangi IP'den, ne büyüklükte mesaj geldiğini görür.
+- **Kullanım sayımı.** Her kurulum abacus.jasoncameron.dev'deki herkese açık bir sayaca bir kez 1 ekler, çalıştığı her gün de o günün sayısına 1 ekler. Yanında kimlik, isim ya da mesaj gitmez; servis sadece isteği ve IP adresini görür. Toplamlar Ayarlar'da görünür, **Kullanım sayımı: kapalı** bunu durdurur.
 - **Üçüncü taraf kod.** TweetNaCl.js Cure53 tarafından denetlendi. noble-post-quantum bağımsız denetimden geçmedi, sadece yazarı denetledi. buddy-chat ikisini birlikte bu yüzden kullanıyor.
 - **Denetlenmedi.** buddy-chat'in kendisi güvenlik denetiminden geçmedi.
 - **Kurtarma kelimeleri hesabının kendisidir.** Onlara sahip olan mesajlarını okuyup gönderebilir ve yedeklerini açabilir.

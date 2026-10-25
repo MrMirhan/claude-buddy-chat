@@ -6,7 +6,7 @@ import { backupKey, fromWords, keysFromEntropy, toWords } from '../hooks/recover
 
 type KP = { publicKey: Uint8Array; secretKey: Uint8Array }
 type Post = { url: string; body: string }
-type World = { feed: string[]; linkFeed: string[]; uploads: Map<string, string>; statuses: string[]; sounds: string[]; notifySent: boolean; posts: Post[]; gets: number; opens: string[]; notes: string[]; toasts: string[]; answer: { value: string }; clock: ReturnType<typeof mock.clock> }
+type World = { feed: string[]; linkFeed: string[]; uploads: Map<string, string>; statuses: string[]; sounds: string[]; notifySent: boolean; posts: Post[]; gets: number; opens: string[]; notes: string[]; toasts: string[]; answer: { value: string }; counters: string[]; clock: ReturnType<typeof mock.clock> }
 
 const enc = (s: string) => new TextEncoder().encode(s)
 const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
@@ -38,7 +38,7 @@ const sent = (w: World, kp: KP) => to(w, kp).filter(p => !['kem', 'pq', 'receipt
 
 // spawn stands in for curl; without one the stream cannot start and the poller carries the test.
 function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?: (e: { argv: string[] }) => AsyncGenerator<object>): World {
-  const w: World = { feed: [], linkFeed: [], uploads: new Map(), statuses: [], sounds: [], notifySent: true, posts: [], gets: 0, opens: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, clock: undefined as never }
+  const w: World = { feed: [], linkFeed: [], uploads: new Map(), statuses: [], sounds: [], notifySent: true, posts: [], gets: 0, opens: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, counters: [], clock: undefined as never }
   mock.store(on, store)
   w.clock = mock.clock(on, { now: 1_800_000_000_000 })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -64,6 +64,10 @@ function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?:
   })
   let n = 0
   on('http.fetch', (_, e) => {
+    if (e.url.startsWith('https://abacus.jasoncameron.dev/')) {
+      w.counters.push(e.url.slice('https://abacus.jasoncameron.dev/'.length))
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ value: e.url.includes('installs') ? 120 : 37 }) } }
+    }
     if (e.init?.method === 'POST') {
       w.posts.push({ url: e.url, body: String(e.init.body) })
       return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
@@ -356,7 +360,7 @@ test('a second session does not poll while another holds the poller', async ($, 
   on('session.id', () => ({ value: 's2' }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('tool.register', (_, e) => ({ value: { tool: 'mcp__buddy-chat__' + e.name } }))
-  on('http.fetch', () => { gets++; return { value: { status: 200, ok: true, headers: {}, text: '' } } })
+  on('http.fetch', (_, e) => { if (!e.url.includes('abacus')) gets++; return { value: { status: 200, ok: true, headers: {}, text: '' } } })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(16000)
   expect(gets).toBe(0)
@@ -1421,4 +1425,25 @@ test('desktop: the text field grows with what is typed, up to 6 rows, and shrink
   const fields = (await ui.findAll({ type: 'Input' } as never)) as { props?: { rows?: number } }[]
   expect(fields.some(f => f.props?.rows === 2)).toBe(true)
   await ui.unmount()
+})
+
+test('an install counts once, each day once, shows the totals in Settings, and stops when turned off', async ($, on) => {
+  const w = setup(on, { ...V4 })
+  await start($)
+  await w.clock.advance(1000)
+  expect(w.counters.filter(u => u.startsWith('hit/'))).toEqual(['hit/buddy-chat-mrmirhan/installs', 'hit/buddy-chat-mrmirhan/active-2027-01-15'])
+
+  const ui = await $.ui.mount(pane('desktop'))
+  await ui.press({ key: 'tab-settings' })
+  await w.clock.advance(1000)
+  expect(await shows(ui, { type: 'Text', text: /120 kurulum · günde ~37 aktif/ })).not.toBeUndefined()
+
+  await ui.unmount()
+})
+
+test('with the usage count off nothing is counted', async ($, on) => {
+  const w = setup(on, { ...V4, privacy: { stats: false } })
+  await start($)
+  await w.clock.advance(1000)
+  expect(w.counters.filter(u => u.startsWith('hit/'))).toEqual([])
 })
