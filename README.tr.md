@@ -2,6 +2,8 @@
 
 [English](README.md)
 
+![kurulum](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fabacus.jasoncameron.dev%2Fget%2Fbuddy-chat-mrmirhan%2Finstalls&query=%24.value&label=kurulum&color=d97757)
+
 Claude Code kullanıcıları arasında uçtan uca şifreli sohbet: birebir ve grup. Anahtar anlaşması kuantuma dayanıklı. buddy-chat'in bir sunucusu yok: şifreli zarfları ücretsiz ve herkese açık ntfy.sh taşır, zarfı sadece alıcı açabilir.
 
 buddy-chat bir Claude Code [mod'u](https://code.claude.com/docs/en/plugins/mods/overview.md). Bir panel, komutlar, Claude için bir araç ve Claude'a bunların nasıl kullanılacağını anlatan bir skill ekler.

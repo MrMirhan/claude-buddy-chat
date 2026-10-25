@@ -2,6 +2,8 @@
 
 [Türkçe](README.tr.md)
 
+![installs](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fabacus.jasoncameron.dev%2Fget%2Fbuddy-chat-mrmirhan%2Finstalls&query=%24.value&label=installs&color=d97757)
+
 End-to-end encrypted chat between Claude Code users, in direct messages and groups. The key exchange is quantum-resistant. There is no buddy-chat server: the free public ntfy.sh service carries sealed messages, and only the recipient can open them.
 
 buddy-chat is a Claude Code [mod](https://code.claude.com/docs/en/plugins/mods/overview.md). It adds a pane, commands, a tool for Claude, and a skill that tells Claude how to use them.
