@@ -37,9 +37,10 @@ const to = (w: World, kp: KP) => w.posts.filter(p => p.url === topicOf(idOf(kp))
 const sent = (w: World, kp: KP) => to(w, kp).filter(p => !['kem', 'pq', 'receipt', 'typing'].includes(opened(p, kp)?.t))
 
 // spawn stands in for curl; without one the stream cannot start and the poller carries the test.
-function setup(on: On, store: Record<string, unknown>, sessionId = 's1', spawn?: (e: { argv: string[] }) => AsyncGenerator<object>): World {
+function setup(on: On, store: Record<string, unknown> | undefined, sessionId = 's1', spawn?: (e: { argv: string[] }) => AsyncGenerator<object>): World {
   const w: World = { feed: [], linkFeed: [], uploads: new Map(), statuses: [], sounds: [], notifySent: true, posts: [], gets: 0, opens: [], notes: [], toasts: [], answer: { value: 'Gönderme' }, counters: [], clock: undefined as never }
-  mock.store(on, store)
+  // undefined: the test answers $.store itself.
+  if (store) mock.store(on, store)
   w.clock = mock.clock(on, { now: 1_800_000_000_000 })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: sessionId }))
@@ -1446,4 +1447,58 @@ test('with the usage count off nothing is counted', async ($, on) => {
   await start($)
   await w.clock.advance(1000)
   expect(w.counters.filter(u => u.startsWith('hit/'))).toEqual([])
+})
+
+test('history: a failed archive write keeps the messages in the store until a later write succeeds', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const conv = 'dm:' + idOf(ahmet)
+  const files = new Map<string, string>()
+  let failing = true
+  on('env.get', (_, e) => ({ value: (e as { name: string }).name === 'HOME' ? '/home/test' : undefined }) as never)
+  on('fs.write', (_, e) => {
+    if (failing) throw new Error('disk full')
+    const { path, text } = e as { path: string; text: string }
+    files.set(path, text)
+    return { value: undefined } as never
+  })
+  const inbox = Array.from({ length: 300 }, (_, i) =>
+    ({ key: 'h' + String(i).padStart(15, '0'), conv, from: idOf(ahmet), name: 'A', text: 'eski ' + i, at: (i + 1) * 1000, mine: false }))
+  const w = setup(on, { ...V4, contacts: [friend(ahmet, 'Ahmet')], inbox })
+  const me = await start($)
+  w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'f000000000000000', name: 'A', text: 'yeni 0' }))
+  await w.clock.advance(8000)
+  expect(files.size).toBe(0)
+  expect(await $.ui.mount(pane('terminal')).then(async ui => { const found = await shows(ui, { type: 'Text', text: /yeni 0/ }); await ui.unmount(); return found })).toBeDefined()
+
+  failing = false
+  w.feed.push(envelope(ahmet, me, { t: 'dm', id: 'f000000000000001', name: 'A', text: 'yeni 1' }))
+  await w.clock.advance(8000)
+  expect(files.size).toBe(1)
+  expect(JSON.parse([...files.values()][0]!).map((m: { text: string }) => m.text)).toEqual(Array.from({ length: 52 }, (_, i) => 'eski ' + i))
+})
+
+test('a contact another session saves between this session\'s read and write is kept', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const mehmet = nacl.box.keyPair()
+  const ali = nacl.box.keyPair()
+  const store = new Map<string, unknown>(Object.entries({ ...V4, contacts: [friend(ahmet, 'Ahmet')] }))
+  let interleave = false
+  on('store.get', (_, e) => {
+    const key = (e as { key: string }).key
+    const value = store.get(key)
+    if (interleave && key === 'contacts') {
+      interleave = false
+      store.set('contacts', [...(value as unknown[]), friend(mehmet, 'Mehmet')])
+    }
+    return { value: value === undefined ? undefined : JSON.parse(JSON.stringify(value)) } as never
+  })
+  on('store.set', (_, e) => { const { key, value } = e as { key: string; value: unknown }; store.set(key, JSON.parse(JSON.stringify(value))); return { value: undefined } as never })
+  on('store.delete', (_, e) => { store.delete((e as { key: string }).key); return { value: undefined } as never })
+  on('store.keys', () => ({ value: [...store.keys()] }) as never)
+  setup(on, undefined)
+  await start($)
+  interleave = true
+  await run($, 'buddy-add', '/buddy-add ' + idOf(ali))
+  const ids = (store.get('contacts') as { id: string }[]).map(c => c.id)
+  expect(ids).toEqual(expect.arrayContaining([idOf(ahmet), idOf(mehmet), idOf(ali)]))
 })

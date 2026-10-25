@@ -399,11 +399,24 @@ function asArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : []
 }
 
-// Every session on the machine shares $.store; each write reads the latest value first so it does not undo another session's write.
+const storeQueue = new Map<string, Promise<unknown>>()
+
+// Every session on the machine shares $.store, which has no compare-and-set. Writes to one key run one at a time in
+// this session, and a value that changed between the read and the write (another session's) is read again and the
+// change made on it, so a concurrent write is kept rather than overwritten by a stale copy.
 async function mutate<T>($: EngineInterface, key: string, fn: (current: T[]) => T[]): Promise<T[]> {
-  const next = fn(asArray<T>(await $.store.get(key)))
-  await $.store.set(key, next)
-  return next
+  const run = async () => {
+    for (let tries = 0; ; tries++) {
+      const before = await $.store.get(key)
+      const next = fn(asArray<T>(before))
+      if (tries < 4 && JSON.stringify(await $.store.get(key)) !== JSON.stringify(before)) continue
+      await $.store.set(key, next)
+      return next
+    }
+  }
+  const job = (storeQueue.get(key) ?? Promise.resolve()).then(run, run)
+  storeQueue.set(key, job.catch(() => {}))
+  return job
 }
 
 async function saveContact($: EngineInterface, contact: Contact) {
@@ -431,16 +444,21 @@ async function touchState($: EngineInterface, field: keyof SyncState['at']) {
 
 async function addMessages($: EngineInterface, msgs: Msg[]) {
   if (!msgs.length) return
-  let overflow: Msg[] = []
   inbox = await mutate<Msg>($, 'inbox', current => {
     const seen = new Set(current.map(m => m.key))
-    const all = [...current, ...msgs.filter(m => !seen.has(m.key))]
-    // Past the cap the store drops to ARCHIVE_TO, so the archive grows a batch at a time, not a file per message.
-    if (all.length <= STORE_MESSAGES) return all
-    overflow = all.slice(0, all.length - ARCHIVE_TO)
-    return all.slice(-ARCHIVE_TO)
+    return [...current, ...msgs.filter(m => !seen.has(m.key))]
   })
-  if (overflow.length) await archive($, overflow).catch(() => {})
+  // Past the cap the store drops to ARCHIVE_TO, so the archive grows a batch at a time, not a file per message.
+  if (inbox.length <= STORE_MESSAGES) return
+  // The oldest leave the store only after their file is written; a failed write keeps them for the next try.
+  const overflow = inbox.slice(0, inbox.length - ARCHIVE_TO)
+  try {
+    await archive($, overflow)
+  } catch {
+    return
+  }
+  const archived = new Set(overflow.map(m => m.key))
+  inbox = await mutate<Msg>($, 'inbox', current => current.filter(m => !archived.has(m.key)))
 }
 
 // ---- History past the store ----
@@ -456,7 +474,7 @@ const convDir = (dir: string, conv: string) => dir + '/' + hex(nacl.hash(encode(
 
 async function archive($: EngineInterface, msgs: Msg[]) {
   const dir = await historyDir($)
-  if (!dir) return
+  if (!dir) throw new Error('no home folder for the history')
   const byConv = new Map<string, Msg[]>()
   for (const m of msgs) byConv.set(m.conv, [...(byConv.get(m.conv) ?? []), m])
   for (const [conv, list] of byConv) {
