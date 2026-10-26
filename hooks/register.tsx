@@ -32,6 +32,8 @@ const STREAM_RETRY_MS = 3000
 const TYPING_SEND_MS = 5000
 const TYPING_SHOW_MS = 9000
 const MSG_KEY_RE = /^[0-9a-f]{16}$/
+// A peer's message id becomes a store key and part of a saved file's name, so it holds no path or shell characters.
+const SAFE_ID_RE = /^[A-Za-z0-9]{1,32}$/
 const MAX_REFS = 60
 // ntfy keeps a message 12 hours; a message nobody confirmed goes out again before that, for up to a week.
 const RETRY_MS = 11 * 3_600_000
@@ -220,6 +222,7 @@ let usage: { installs?: number; active?: number } = {}
 let usageAt = 0
 let groupSeq = 0
 let pollerAt = 0
+let storeWarned = false
 // Terminal: the message j/k marked; its actions take one key (e, x, f). Empty: no mark.
 let cursor = ''
 // The chat fills the pane's height with the composer at the bottom, so it pages instead of scrolling the pane.
@@ -283,7 +286,10 @@ const cleanUsername = (s: string) => {
   const u = s.trim().replace(/^@/, '').toLowerCase()
   return USERNAME_RE.test(u) ? u : ''
 }
-const cleanText = (s: string, max: number) => s.replace(/\s+/g, ' ').trim().slice(0, max)
+// Control characters (terminal escapes among them) and direction overrides never come from a person's keyboard.
+const CONTROL_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g
+const cleanText = (s: string, max: number) => s.replace(CONTROL_RE, '').replace(/\s+/g, ' ').trim().slice(0, max)
+const cleanBody = (s: string) => s.replace(CONTROL_RE, '').slice(0, 4000)
 
 function cleanProfile(value: unknown): Profile {
   const p = (value && typeof value === 'object' ? value : {}) as Partial<Profile>
@@ -359,15 +365,19 @@ function hybridKey(id: string, pq: string): Uint8Array {
   return key
 }
 
-function seal(to: string, payload: Payload): string {
+// Inside the box go the recipient and the time, so a box cannot be sent back to its sender (both directions share
+// one key) or played again later; see fresh().
+function seal(to: string, payload: Payload, ts: number): string {
   const nonce = nacl.randomBytes(nacl.box.nonceLength)
-  const plain = encode(JSON.stringify(payload))
+  const plain = encode(JSON.stringify({ ...payload, to, ts }))
   const pq = HANDSHAKE.has(payload.t) ? undefined : contactOf(to)?.pq
   const box = pq ? nacl.secretbox(plain, nonce, hybridKey(to, pq)) : nacl.box.after(plain, nonce, sharedKey(to))
   return JSON.stringify({ v: WIRE_VERSION, from: me, nonce: b64(nonce), box: b64(box), ...(pq ? { h: 1 } : {}) })
 }
 
-function unseal(env: Envelope): { p: Payload; hybrid: boolean } | undefined {
+type Stamp = { to?: unknown; ts?: unknown }
+
+function unseal(env: Envelope): { p: Payload; stamp: Stamp; hybrid: boolean } | undefined {
   try {
     const box = unb64(env.box)
     const nonce = unb64(env.nonce)
@@ -381,7 +391,7 @@ function unseal(env: Envelope): { p: Payload; hybrid: boolean } | undefined {
     }
     if (!plain) return undefined
     const p = JSON.parse(new TextDecoder().decode(plain))
-    return p && typeof p === 'object' && typeof p.t === 'string' && typeof p.id === 'string' ? { p, hybrid: env.h === 1 } : undefined
+    return p && typeof p === 'object' && typeof p.t === 'string' && typeof p.id === 'string' ? { p, stamp: { to: p.to, ts: p.ts }, hybrid: env.h === 1 } : undefined
   } catch {
     return undefined
   }
@@ -427,7 +437,10 @@ const MSG_KEY = 'msg:'
 const BLOCK_KEY = 'blocked:'
 const MUTE_KEY = 'muted:'
 const GONE_KEY = 'gone:'
-const KEYED = [CONTACT_KEY, GROUP_KEY, MSG_KEY, BLOCK_KEY, MUTE_KEY, GONE_KEY]
+// Per sender: the ids of boxes already taken, and whether they stamp their boxes (see fresh()).
+const SEEN_KEY = 'seen:'
+const STAMPS_KEY = 'stamps:'
+const KEYED = [CONTACT_KEY, GROUP_KEY, MSG_KEY, BLOCK_KEY, MUTE_KEY, GONE_KEY, SEEN_KEY, STAMPS_KEY]
 
 const keysWith = async ($: EngineInterface, prefix: string) => (await $.store.keys()).filter(k => k.startsWith(prefix))
 
@@ -730,11 +743,11 @@ const idList = (value: unknown) => asArray<unknown>(value).filter((x): x is stri
 
 function cleanMsg(value: unknown): Msg | undefined {
   const m = value as Partial<Msg> | null
-  if (!m || typeof m.key !== 'string' || m.key.length > 64 || typeof m.conv !== 'string' || !CONV_RE.test(m.conv) || typeof m.at !== 'number') return undefined
+  if (!m || typeof m.key !== 'string' || !SAFE_ID_RE.test(m.key) || typeof m.conv !== 'string' || !CONV_RE.test(m.conv) || typeof m.at !== 'number') return undefined
   const from = typeof m.from === 'string' ? m.from : ''
   const sys = m.sys && typeof m.sys === 'object' && isKey(m.sys.key) ? m.sys : undefined
   return {
-    key: m.key, conv: m.conv, from, name: cleanText(String(m.name ?? ''), 40), text: String(m.text ?? '').slice(0, 4000), at: m.at,
+    key: m.key, conv: m.conv, from, name: cleanText(String(m.name ?? ''), 40), text: cleanBody(String(m.text ?? '')), at: m.at,
     mine: !!from && from === me,
     ...(m.system ? { system: true } : {}),
     ...(sys ? { sys } : {}),
@@ -827,7 +840,7 @@ async function receiveSelf($: EngineInterface, p: SelfPayload) {
     case 'patch': {
       if (typeof p.ref !== 'string' || !p.patch) return
       const patch: Partial<Msg> = {}
-      if (typeof p.patch.text === 'string') patch.text = p.patch.text.slice(0, 4000)
+      if (typeof p.patch.text === 'string') patch.text = cleanBody(p.patch.text)
       if (p.patch.edited) patch.edited = true
       if (p.patch.deleted) patch.deleted = true
       await patchMessage($, p.ref, me, patch)
@@ -1332,7 +1345,8 @@ async function revealPath($: EngineInterface, path: string) {
 
 async function openPath($: EngineInterface, path: string) {
   if (!isOpenable(path)) return revealPath($, path)
-  for (const argv of [['open', path], ['xdg-open', path], ['cmd', '/c', 'start', '', path]]) {
+  // Windows: Start-Process takes the path as an argument, where cmd /c start would read & and ^ in it as commands.
+  for (const argv of [['open', path], ['xdg-open', path], ['powershell', '-NoProfile', '-Command', 'Start-Process -FilePath $args[0]', path]]) {
     try {
       if ((await $.process.run(argv, { timeoutMs: 10_000 })).exitCode === 0) return
     } catch {
@@ -1369,11 +1383,14 @@ async function attachFile($: EngineInterface, conv: string): Promise<Outcome> {
 
 // Fetches a received file while the relay still has it (3 hours) and saves it under ~/Downloads/buddy-chat.
 async function downloadFile($: EngineInterface, msg: Msg): Promise<boolean> {
-  if (!msg.file) return false
+  if (!msg.file || !SAFE_ID_RE.test(msg.key)) return false
   let plain: Uint8Array | null = null
   try {
     const res = await $.http.fetch(msg.file.url)
-    if (res.ok) plain = nacl.secretbox.open(unb64(res.text.trim()), unb64(msg.file.nonce), unb64(msg.file.key))
+    // The sender's limit holds here too: a sealed file is base64 of the file plus its 16-byte tag.
+    if (res.ok && res.text.trim().length <= Math.ceil((MAX_FILE_BYTES + 16) / 3) * 4) {
+      plain = nacl.secretbox.open(unb64(res.text.trim()), unb64(msg.file.nonce), unb64(msg.file.key))
+    }
   } catch {
     plain = null
   }
@@ -1630,16 +1647,54 @@ function cleanMembers(value: unknown): Member[] {
     .slice(0, MAX_GROUP)
 }
 
+// Ntfy keeps a message 12 hours; a box stamped further from now than this is a copy someone kept.
+const FRESH_MS = 36 * 3_600_000
+const SEEN_MAX = 2000
+
+// A box is taken once: addressed to us, stamped within FRESH_MS, and with an id not seen from that sender before.
+// A sender that once stamped its boxes always does, so an unstamped box from them is an old capture.
+async function fresh($: EngineInterface, from: string, id: string, stamp: Stamp): Promise<boolean> {
+  if (stamp.to !== undefined && stamp.to !== me) return false
+  const now = await $.clock.now()
+  if (typeof stamp.ts === 'number') {
+    if (Math.abs(now - stamp.ts) > FRESH_MS) return false
+    const known = from === me || !!contactOf(from)
+    if (known && (await $.store.get(STAMPS_KEY + from)) !== true) await $.store.set(STAMPS_KEY + from, true)
+  } else if ((await $.store.get(STAMPS_KEY + from)) === true) {
+    return false
+  }
+  return !numberMap(await $.store.get(SEEN_KEY + from))[id]
+}
+
+async function markSeen($: EngineInterface, from: string, id: string) {
+  const now = await $.clock.now()
+  const seen = Object.entries({ ...numberMap(await $.store.get(SEEN_KEY + from)), [id]: now })
+    .filter(([, at]) => now - at <= FRESH_MS)
+    .sort((a, b) => a[1] - b[1])
+    .slice(-SEEN_MAX)
+  await $.store.set(SEEN_KEY + from, Object.fromEntries(seen))
+}
+
 async function receive($: EngineInterface, env: Envelope, at: number) {
   if (blocked.includes(env.from)) return
   const opened = unseal(env)
-  if (!opened) return
+  if (!opened || !SAFE_ID_RE.test(opened.p.id)) return
+  if (!(await fresh($, env.from, opened.p.id, opened.stamp))) return
+  // Only a sender we know, or one of our own devices, gets a seen list, so strangers cannot grow the store with it.
+  const known = env.from === me || !!contactOf(env.from)
+  // A key exchange is claimed before it runs, so two sessions that both hold it do not each answer it.
+  const claimFirst = HANDSHAKE.has(opened.p.t)
+  if (known && claimFirst) await markSeen($, env.from, opened.p.id)
+  await receiveOpened($, env, opened.p, opened.hybrid, at)
+  if ((known || contactOf(env.from)) && !claimFirst) await markSeen($, env.from, opened.p.id)
+}
+
+async function receiveOpened($: EngineInterface, env: Envelope, p: Payload, hybrid: boolean, at: number) {
   // Sealed with our own key: only another device of ours can have written it.
   if (env.from === me) {
-    if (opened.p.t === 'self') await receiveSelf($, opened.p)
+    if (p.t === 'self') await receiveSelf($, p)
     return
   }
-  const { p, hybrid } = opened
   const c = contactOf(env.from)
   // Once the quantum-resistant key exists, classic-sealed content from that person is refused.
   if (c?.pq && !hybrid && !HANDSHAKE.has(p.t)) return
@@ -1711,7 +1766,7 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
     }
     case 'dm': {
       if (c?.state !== 'friend') return
-      const text = String(p.text ?? '')
+      const text = cleanBody(String(p.text ?? ''))
       const file = cleanFile(p.file)
       const msg: Msg = { key: p.id, conv: convOf(env.from), from: env.from, name: ownName(c.profile), text, at, mine: false, ...(file ? { file } : {}) }
       await addMessages($, [msg])
@@ -1734,7 +1789,7 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
       return
     }
     case 'edit':
-      await patchMessage($, String(p.ref), env.from, { text: String(p.text ?? ''), edited: true })
+      await patchMessage($, String(p.ref), env.from, { text: cleanBody(String(p.text ?? '')), edited: true })
       return
     case 'delete':
       await patchMessage($, String(p.ref), env.from, { text: '', deleted: true })
@@ -1769,7 +1824,7 @@ async function receive($: EngineInterface, env: Envelope, at: number) {
   const member = group.members.find(m => m.id === env.from)
   if (!member) return
   if (p.t === 'group') {
-    const text = String(p.text ?? '')
+    const text = cleanBody(String(p.text ?? ''))
     const file = cleanFile(p.file)
     const msg: Msg = { key: p.id, conv: groupConv(group.id), from: env.from, name: member.name, text, at, mine: false, ...(file ? { file } : {}) }
     await addMessages($, [msg])
@@ -1916,7 +1971,17 @@ async function handleLine($: EngineInterface, line: string): Promise<string | un
   }
   if (!ev || ev.event !== 'message' || !ev.id || !ev.message) return undefined
   const env = parseEnvelope(ev.message)
-  if (env) await receive($, env, (ev.time ?? 0) * 1000)
+  // One message that cannot be stored (a full store, say) must not hold back every message after it.
+  if (env) {
+    try {
+      await receive($, env, (ev.time ?? 0) * 1000)
+    } catch {
+      if (!storeWarned) {
+        storeWarned = true
+        $.ui.toast(t('storeFailed'))
+      }
+    }
+  }
   return ev.id
 }
 
@@ -2004,7 +2069,7 @@ async function sendKem($: EngineInterface, id: string) {
 }
 
 async function post($: EngineInterface, to: string, payload: Payload): Promise<PostError | undefined> {
-  const body = seal(to, payload)
+  const body = seal(to, payload, await $.clock.now())
   if (encode(body).length > MAX_BODY_BYTES) return { code: 'tooLong', detail: '' }
   try {
     const res = await $.http.fetch(topicUrl(to), { method: 'POST', body })
@@ -3406,14 +3471,18 @@ export const register: Register = on => {
             await updateStored($, m.key, x => ({ ...x, forwarded: true }))
             await bumpInbox($)
             redraw()
-            const name = nameOf(m.from, m.name)
-            // A fence longer than any backtick run in the text, so the message cannot close it and write as the person.
-            const fence = '`'.repeat(Math.max(3, ...(m.text.match(/`+/g) ?? []).map(r => r.length + 1)))
-            const text = fence + '\n' + m.text + '\n' + fence
-            void $.prompt.submit({
-              text: (group ? t('forwardGroup', { group: group.title, name, text }) : t('forwardDm', { name, text }))
-                + (m.saved ? '\n\n' + t('forwardFile', { path: m.saved }) : ''),
-            })
+            // Every part a peer chose (their name, the group title, the file name in the path) goes inside the fence,
+            // which is longer than any backtick run in it, so nothing they wrote can close it and write as the person.
+            const body = [
+              t('forwardFrom', { name: nameOf(m.from, m.name) }),
+              ...(group ? [t('forwardInGroup', { group: group.title })] : []),
+              '',
+              m.text,
+              ...(m.saved ? ['', t('forwardFile', { path: m.saved })] : []),
+            ].join('\n')
+            const fence = '`'.repeat(Math.max(3, ...(body.match(/`+/g) ?? []).map(r => r.length + 1)))
+            const text = fence + '\n' + body + '\n' + fence
+            void $.prompt.submit({ text: group ? t('forwardGroup', { text }) : t('forwardDm', { text }) })
           }} />
         </Box>
       )
