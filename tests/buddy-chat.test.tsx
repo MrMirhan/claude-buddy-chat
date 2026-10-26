@@ -1487,7 +1487,7 @@ test('history: a failed archive write keeps the messages in the store until a la
   expect(JSON.parse([...files.values()][0]!).map((m: { text: string }) => m.text)).toEqual(Array.from({ length: 52 }, (_, i) => 'eski ' + i))
 })
 
-test('a contact another session saves between this session\'s read and write is kept', async ($, on) => {
+test('a contact another session saves at any point while this session saves one is kept', async ($, on) => {
   const ahmet = nacl.box.keyPair()
   const mehmet = nacl.box.keyPair()
   const ali = nacl.box.keyPair()
@@ -1496,20 +1496,25 @@ test('a contact another session saves between this session\'s read and write is 
   on('store.get', (_, e) => {
     const key = (e as { key: string }).key
     const value = store.get(key)
-    if (interleave && key === 'contacts') {
-      interleave = false
-      store.set('contacts', [...(value as unknown[]), friend(mehmet, 'Mehmet')])
-    }
     return { value: value === undefined ? undefined : JSON.parse(JSON.stringify(value)) } as never
   })
-  on('store.set', (_, e) => { const { key, value } = e as { key: string; value: unknown }; store.set(key, JSON.parse(JSON.stringify(value))); return { value: undefined } as never })
+  on('store.set', (_, e) => {
+    const { key, value } = e as { key: string; value: unknown }
+    // Another session commits a contact at the worst moment: right before this session's own write lands.
+    if (interleave && key.startsWith('contact')) {
+      interleave = false
+      store.set('contact:' + idOf(mehmet), friend(mehmet, 'Mehmet'))
+    }
+    store.set(key, JSON.parse(JSON.stringify(value)))
+    return { value: undefined } as never
+  })
   on('store.delete', (_, e) => { store.delete((e as { key: string }).key); return { value: undefined } as never })
   on('store.keys', () => ({ value: [...store.keys()] }) as never)
   setup(on, undefined)
   await start($)
   interleave = true
   await run($, 'buddy-add', '/buddy-add ' + idOf(ali))
-  const ids = (store.get('contacts') as { id: string }[]).map(c => c.id)
+  const ids = [...store.keys()].filter(k => k.startsWith('contact:')).map(k => k.slice('contact:'.length))
   expect(ids).toEqual(expect.arrayContaining([idOf(ahmet), idOf(mehmet), idOf(ali)]))
 })
 

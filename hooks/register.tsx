@@ -419,13 +419,40 @@ async function mutate<T>($: EngineInterface, key: string, fn: (current: T[]) => 
   return job
 }
 
+// Each contact and group has a key of its own, so a session that saves one never writes over one another session saved.
+const CONTACT_KEY = 'contact:'
+const GROUP_KEY = 'group:'
+
+async function loadKeyed<T extends { id: string }>($: EngineInterface, prefix: string, legacyKey: string): Promise<T[]> {
+  // Before 0.20.3 each list was one array; its entries move to their own keys, and a key already there wins.
+  const legacy = await $.store.get(legacyKey)
+  if (Array.isArray(legacy)) {
+    for (const x of legacy as T[]) {
+      if (x && typeof x.id === 'string' && (await $.store.get(prefix + x.id)) === undefined) await $.store.set(prefix + x.id, x)
+    }
+    await $.store.delete(legacyKey)
+  }
+  const out: T[] = []
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith(prefix)) continue
+    const x = (await $.store.get(key)) as T | undefined
+    if (x && typeof x === 'object' && typeof x.id === 'string') out.push(x)
+  }
+  return out
+}
+
+const loadContacts = ($: EngineInterface) => loadKeyed<Contact>($, CONTACT_KEY, 'contacts')
+const loadGroups = ($: EngineInterface) => loadKeyed<Group>($, GROUP_KEY, 'groups')
+
 async function saveContact($: EngineInterface, contact: Contact) {
-  const changed = await $.clock.now()
-  contacts = await mutate<Contact>($, 'contacts', cur => [...cur.filter(c => c.id !== contact.id), { ...contact, changed }])
+  const saved = { ...contact, changed: await $.clock.now() }
+  await $.store.set(CONTACT_KEY + contact.id, saved)
+  contacts = [...contacts.filter(c => c.id !== contact.id), saved]
 }
 
 async function dropContact($: EngineInterface, id: string) {
-  contacts = await mutate<Contact>($, 'contacts', cur => cur.filter(c => c.id !== id))
+  await $.store.delete(CONTACT_KEY + id)
+  contacts = contacts.filter(c => c.id !== id)
   await markGone($, id)
   if (selected === convOf(id)) selected = ''
 }
@@ -791,27 +818,23 @@ async function mergeState($: EngineInterface, st: SyncState, fromPrimary: boolea
   const alive = <T extends { id: string; changed?: number }>(x: T) => !(gone[x.id] && gone[x.id]! >= (x.changed ?? 0))
 
   const theirContacts = asArray<unknown>(st.contacts).map(cleanContact).filter((c): c is Contact => !!c)
-  contacts = await mutate<Contact>($, 'contacts', current => {
-    const out = new Map(current.map(c => [c.id, c]))
-    for (const c of theirContacts) {
-      const mine = out.get(c.id)
-      let next = !mine || (c.changed ?? 0) > (mine.changed ?? 0) ? c : mine
-      // Only the primary runs encapsulation, so its ML-KEM keys win and another device's copy never replaces them.
-      if (fromPrimary && c.pq) next = { ...next, pq: c.pq, pqPrev: c.pqPrev }
-      else if (!fromPrimary && mine) next = { ...next, pq: mine.pq, pqPrev: mine.pqPrev }
-      out.set(c.id, next)
-    }
-    return [...out.values()].filter(alive)
-  })
+  for (const c of theirContacts) {
+    const mine = (await $.store.get(CONTACT_KEY + c.id)) as Contact | undefined
+    let next = !mine || (c.changed ?? 0) > (mine.changed ?? 0) ? c : mine
+    // Only the primary runs encapsulation, so its ML-KEM keys win and another device's copy never replaces them.
+    if (fromPrimary && c.pq) next = { ...next, pq: c.pq, pqPrev: c.pqPrev }
+    else if (!fromPrimary && mine) next = { ...next, pq: mine.pq, pqPrev: mine.pqPrev }
+    await $.store.set(CONTACT_KEY + c.id, next)
+  }
+  for (const c of await loadContacts($)) if (!alive(c)) await $.store.delete(CONTACT_KEY + c.id)
+  contacts = await loadContacts($)
   const theirGroups = asArray<unknown>(st.groups).map(cleanGroup).filter((g): g is Group => !!g)
-  groups = await mutate<Group>($, 'groups', current => {
-    const out = new Map(current.map(g => [g.id, g]))
-    for (const g of theirGroups) {
-      const mine = out.get(g.id)
-      if (!mine || (g.changed ?? 0) > (mine.changed ?? 0)) out.set(g.id, g)
-    }
-    return [...out.values()].filter(alive)
-  })
+  for (const g of theirGroups) {
+    const mine = (await $.store.get(GROUP_KEY + g.id)) as Group | undefined
+    if (!mine || (g.changed ?? 0) > (mine.changed ?? 0)) await $.store.set(GROUP_KEY + g.id, g)
+  }
+  for (const g of await loadGroups($)) if (!alive(g)) await $.store.delete(GROUP_KEY + g.id)
+  groups = await loadGroups($)
 
   const at = numberMap(st.at)
   if ((at.blocked ?? 0) > stateAt.blocked) {
@@ -917,6 +940,7 @@ async function resetAccount($: EngineInterface, entropy?: Uint8Array) {
     'linked', 'primary', 'devices', 'profile', 'profileSent', 'notices', 'typing', 'linkPending', 'activeAt']) {
     await $.store.delete(key)
   }
+  for (const key of await $.store.keys()) if (key.startsWith(CONTACT_KEY) || key.startsWith(GROUP_KEY)) await $.store.delete(key)
   sharedKeys.clear()
   hybridKeys.clear()
   topics.clear()
@@ -1092,8 +1116,11 @@ async function applySnapshot($: EngineInterface, value: unknown, fromBackup = fa
   const now = await $.clock.now()
   const msgs = asArray<unknown>(snap.inbox).map(cleanMsg).filter((m): m is Msg => !!m)
   for (const m of msgs) shown.add(m.key)
-  await $.store.set('contacts', asArray<unknown>(snap.contacts).map(cleanContact).filter(Boolean))
-  await $.store.set('groups', asArray<unknown>(snap.groups).map(cleanGroup).filter(Boolean))
+  for (const key of await $.store.keys()) if (key.startsWith(CONTACT_KEY) || key.startsWith(GROUP_KEY)) await $.store.delete(key)
+  await $.store.delete('contacts')
+  await $.store.delete('groups')
+  for (const c of asArray<unknown>(snap.contacts).map(cleanContact)) if (c) await $.store.set(CONTACT_KEY + c.id, c)
+  for (const g of asArray<unknown>(snap.groups).map(cleanGroup)) if (g) await $.store.set(GROUP_KEY + g.id, g)
   await $.store.set('inbox', msgs)
   await $.store.set('blocked', idList(snap.blocked))
   await $.store.set('gone', numberMap(snap.gone))
@@ -1517,11 +1544,14 @@ async function addNotice($: EngineInterface, key: string, sys: Sys) {
 
 async function saveGroup($: EngineInterface, group: Group) {
   const changed = await $.clock.now()
-  groups = await mutate<Group>($, 'groups', current => [...current.filter(g => g.id !== group.id), { ...group, changed }])
+  const saved = { ...group, changed }
+  await $.store.set(GROUP_KEY + group.id, saved)
+  groups = [...groups.filter(g => g.id !== group.id), saved]
 }
 
 async function dropGroup($: EngineInterface, id: string) {
-  groups = await mutate<Group>($, 'groups', current => current.filter(g => g.id !== id))
+  await $.store.delete(GROUP_KEY + id)
+  groups = groups.filter(g => g.id !== id)
   await markGone($, id)
   if (selected === groupConv(id)) selected = ''
 }
@@ -1691,9 +1721,9 @@ async function refresh($: EngineInterface, quiet = false) {
   const savedLang = await $.store.get('lang')
   lang = isLang(savedLang) ? savedLang : 'en'
   profile = cleanProfile(await $.store.get('profile'))
-  contacts = asArray<Contact>(await $.store.get('contacts'))
+  contacts = await loadContacts($)
   blocked = asArray<string>(await $.store.get('blocked'))
-  groups = asArray<Group>(await $.store.get('groups'))
+  groups = await loadGroups($)
   inbox = asArray<Msg>(await $.store.get('inbox'))
   const savedRead = await $.store.get('readAt')
   readAt = savedRead && typeof savedRead === 'object' ? (savedRead as Record<string, number>) : {}
