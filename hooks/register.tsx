@@ -455,9 +455,8 @@ const KEYED = [CONTACT_KEY, GROUP_KEY, MSG_KEY, BLOCK_KEY, MUTE_KEY, GONE_KEY, S
 const keysWith = async ($: EngineInterface, prefix: string) => (await $.store.keys()).filter(k => k.startsWith(prefix))
 
 async function loadKeyed<T extends object>($: EngineInterface, prefix: string, legacyKey: string, idOfRecord: (x: T) => unknown): Promise<T[]> {
-  // Before 0.20.3 each list was one array; its entries move to their own keys, and a key already there wins.
-  // An older plugin version in another session may still write the array: its entry wins only where it changed later,
-  // and an entry removed since does not come back.
+  // Before 0.21 each list was one array; its entries move to their own keys. An older plugin version in another session
+  // may still write the array: its entry wins only where it changed later, and an entry removed since does not come back.
   const legacy = await $.store.get(legacyKey)
   if (Array.isArray(legacy)) {
     for (const x of legacy as (T & { changed?: number })[]) {
