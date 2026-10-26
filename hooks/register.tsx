@@ -419,30 +419,88 @@ async function mutate<T>($: EngineInterface, key: string, fn: (current: T[]) => 
   return job
 }
 
-// Each contact and group has a key of its own, so a session that saves one never writes over one another session saved.
+// Every record has a store key of its own (a contact, a group, a message, a block, a mute, a removal), so a session that
+// writes one never writes over a record another session wrote: $.store has no compare-and-set to guard a shared list.
 const CONTACT_KEY = 'contact:'
 const GROUP_KEY = 'group:'
+const MSG_KEY = 'msg:'
+const BLOCK_KEY = 'blocked:'
+const MUTE_KEY = 'muted:'
+const GONE_KEY = 'gone:'
+const KEYED = [CONTACT_KEY, GROUP_KEY, MSG_KEY, BLOCK_KEY, MUTE_KEY, GONE_KEY]
 
-async function loadKeyed<T extends { id: string }>($: EngineInterface, prefix: string, legacyKey: string): Promise<T[]> {
+const keysWith = async ($: EngineInterface, prefix: string) => (await $.store.keys()).filter(k => k.startsWith(prefix))
+
+async function loadKeyed<T extends object>($: EngineInterface, prefix: string, legacyKey: string, idOfRecord: (x: T) => unknown): Promise<T[]> {
   // Before 0.20.3 each list was one array; its entries move to their own keys, and a key already there wins.
   const legacy = await $.store.get(legacyKey)
   if (Array.isArray(legacy)) {
     for (const x of legacy as T[]) {
-      if (x && typeof x.id === 'string' && (await $.store.get(prefix + x.id)) === undefined) await $.store.set(prefix + x.id, x)
+      const id = x && typeof x === 'object' ? idOfRecord(x) : undefined
+      if (typeof id === 'string' && (await $.store.get(prefix + id)) === undefined) await $.store.set(prefix + id, x)
     }
     await $.store.delete(legacyKey)
   }
   const out: T[] = []
-  for (const key of await $.store.keys()) {
-    if (!key.startsWith(prefix)) continue
+  for (const key of await keysWith($, prefix)) {
     const x = (await $.store.get(key)) as T | undefined
-    if (x && typeof x === 'object' && typeof x.id === 'string') out.push(x)
+    if (x && typeof x === 'object' && typeof idOfRecord(x) === 'string') out.push(x)
   }
   return out
 }
 
-const loadContacts = ($: EngineInterface) => loadKeyed<Contact>($, CONTACT_KEY, 'contacts')
-const loadGroups = ($: EngineInterface) => loadKeyed<Group>($, GROUP_KEY, 'groups')
+const loadContacts = ($: EngineInterface) => loadKeyed<Contact>($, CONTACT_KEY, 'contacts', c => c.id)
+const loadGroups = ($: EngineInterface) => loadKeyed<Group>($, GROUP_KEY, 'groups', g => g.id)
+const loadInbox = ($: EngineInterface) => loadKeyed<Msg>($, MSG_KEY, 'inbox', m => m.key)
+
+// A set of ids, one key each; the old array form moves over on the first load.
+async function loadFlags($: EngineInterface, prefix: string, legacyKey: string): Promise<string[]> {
+  const legacy = await $.store.get(legacyKey)
+  if (Array.isArray(legacy)) {
+    for (const id of legacy) if (typeof id === 'string') await $.store.set(prefix + id, true)
+    await $.store.delete(legacyKey)
+  }
+  return (await keysWith($, prefix)).map(k => k.slice(prefix.length))
+}
+
+// Another device's newer list replaces this one: ids it lacks go, ids it has are set.
+async function replaceFlags($: EngineInterface, prefix: string, ids: string[]) {
+  const want = new Set(ids)
+  for (const key of await keysWith($, prefix)) if (!want.has(key.slice(prefix.length))) await $.store.delete(key)
+  for (const id of want) await $.store.set(prefix + id, true)
+}
+
+async function loadGone($: EngineInterface): Promise<Record<string, number>> {
+  const legacy = numberMap(await $.store.get('gone'))
+  for (const [id, at] of Object.entries(legacy)) await raiseGone($, id, at)
+  await $.store.delete('gone')
+  const out: Record<string, number> = {}
+  for (const key of await keysWith($, GONE_KEY)) {
+    const at = await $.store.get(key)
+    if (typeof at === 'number') out[key.slice(GONE_KEY.length)] = at
+  }
+  return out
+}
+
+// A removal time only moves forward, so a later removal from any session or device stands.
+async function raiseGone($: EngineInterface, id: string, at: number) {
+  const had = await $.store.get(GONE_KEY + id)
+  if (typeof had !== 'number' || at > had) await $.store.set(GONE_KEY + id, at)
+}
+
+// Changes one stored message from its latest copy; fn answers undefined to leave it as it is.
+async function updateStored($: EngineInterface, key: string, fn: (m: Msg) => Msg | undefined): Promise<boolean> {
+  const current = (await $.store.get(MSG_KEY + key)) as Msg | undefined
+  const next = current && fn(current)
+  if (!next) return false
+  await $.store.set(MSG_KEY + key, next)
+  inbox = inbox.some(m => m.key === key) ? inbox.map(m => (m.key === key ? next : m)) : [...inbox, next]
+  return true
+}
+
+// Tells every session the messages changed; a session reloads them when this differs from what it last read.
+let inboxRev: unknown = {}
+const bumpInbox = ($: EngineInterface) => $.store.set('inboxRev', newId())
 
 async function saveContact($: EngineInterface, contact: Contact) {
   const saved = { ...contact, changed: await $.clock.now() }
@@ -459,9 +517,9 @@ async function dropContact($: EngineInterface, id: string) {
 
 // A removed contact or group, so a linked device that still has it drops it too.
 async function markGone($: EngineInterface, id: string) {
-  const saved = (await $.store.get('gone')) as Record<string, number> | undefined
-  gone = { ...(saved && typeof saved === 'object' ? saved : {}), [id]: await $.clock.now() }
-  await $.store.set('gone', gone)
+  const at = await $.clock.now()
+  await raiseGone($, id, at)
+  gone = { ...gone, [id]: Math.max(gone[id] ?? 0, at) }
 }
 
 async function touchState($: EngineInterface, field: keyof SyncState['at']) {
@@ -471,21 +529,30 @@ async function touchState($: EngineInterface, field: keyof SyncState['at']) {
 
 async function addMessages($: EngineInterface, msgs: Msg[]) {
   if (!msgs.length) return
-  inbox = await mutate<Msg>($, 'inbox', current => {
-    const seen = new Set(current.map(m => m.key))
-    return [...current, ...msgs.filter(m => !seen.has(m.key))]
-  })
+  const added: Msg[] = []
+  for (const m of msgs) {
+    if (added.some(a => a.key === m.key) || (await $.store.get(MSG_KEY + m.key)) !== undefined) continue
+    await $.store.set(MSG_KEY + m.key, m)
+    added.push(m)
+  }
+  if (!added.length) return
+  inbox = [...inbox.filter(m => !added.some(a => a.key === m.key)), ...added]
+  await bumpInbox($)
   // Past the cap the store drops to ARCHIVE_TO, so the archive grows a batch at a time, not a file per message.
-  if (inbox.length <= STORE_MESSAGES) return
+  if ((await keysWith($, MSG_KEY)).length <= STORE_MESSAGES) return
+  const all = await loadInbox($)
   // The oldest leave the store only after their file is written; a failed write keeps them for the next try.
-  const overflow = inbox.slice(0, inbox.length - ARCHIVE_TO)
+  const overflow = all.slice(0, all.length - ARCHIVE_TO)
   try {
     await archive($, overflow)
   } catch {
+    inbox = all
     return
   }
+  for (const m of overflow) await $.store.delete(MSG_KEY + m.key)
   const archived = new Set(overflow.map(m => m.key))
-  inbox = await mutate<Msg>($, 'inbox', current => current.filter(m => !archived.has(m.key)))
+  inbox = all.filter(m => !archived.has(m.key))
+  await bumpInbox($)
 }
 
 // ---- History past the store ----
@@ -564,13 +631,8 @@ function forgetHistory() {
 }
 
 async function patchMessage($: EngineInterface, key: string, from: string, patch: Partial<Msg>): Promise<boolean> {
-  let hit = false
-  inbox = await mutate<Msg>($, 'inbox', current =>
-    current.map(m => {
-      if (m.key !== key || m.from !== from || m.deleted) return m
-      hit = true
-      return { ...m, ...patch }
-    }))
+  const hit = await updateStored($, key, m => (m.from !== from || m.deleted ? undefined : { ...m, ...patch }))
+  if (hit) await bumpInbox($)
   return hit
 }
 
@@ -597,14 +659,16 @@ async function flushReceipts($: EngineInterface) {
 async function ackMessages($: EngineInterface, from: string, kind: ReceiptKind, refs: string[]) {
   const c = contactOf(from)
   if (c && !c.acks) await saveContact($, { ...c, acks: true })
-  const keys = new Set(refs)
-  inbox = await mutate<Msg>($, 'inbox', current =>
-    current.map(m => {
-      if (!m.mine || !keys.has(m.key) || !recipients(m.conv).some(r => r.id === from)) return m
+  let changed = false
+  for (const ref of new Set(refs)) {
+    changed = (await updateStored($, ref, m => {
+      if (!m.mine || !recipients(m.conv).some(r => r.id === from)) return undefined
       const deliveredTo = m.deliveredTo?.includes(from) ? m.deliveredTo : [...(m.deliveredTo ?? []), from]
       const readBy = kind !== 'read' || m.readBy?.includes(from) ? m.readBy : [...(m.readBy ?? []), from]
       return { ...m, deliveredTo, readBy }
-    }))
+    })) || changed
+  }
+  if (changed) await bumpInbox($)
 }
 
 // until 0 clears the person's typing mark in that chat.
@@ -624,8 +688,8 @@ async function setTyping($: EngineInterface, conv: string, from: string, until: 
 async function markRead($: EngineInterface, conv: string) {
   const unseen = inbox.filter(m => m.conv === conv && !m.mine && !m.system && !m.deleted && !m.seen)
   if (!unseen.length) return
-  const keys = new Set(unseen.map(m => m.key))
-  inbox = await mutate<Msg>($, 'inbox', current => current.map(m => (keys.has(m.key) ? { ...m, seen: true } : m)))
+  for (const m of unseen) await updateStored($, m.key, x => ({ ...x, seen: true }))
+  await bumpInbox($)
   if (!privacy.readReceipts) return
   for (const m of unseen) queueReceipt(m.from, 'read', m.key)
   await flushReceipts($)
@@ -641,7 +705,9 @@ async function sendTyping($: EngineInterface, conv: string, value: string) {
 }
 
 async function toggleMute($: EngineInterface, conv: string) {
-  muted = await mutate<string>($, 'muted', current => (current.includes(conv) ? current.filter(c => c !== conv) : [...current, conv]))
+  if ((await $.store.get(MUTE_KEY + conv)) === undefined) await $.store.set(MUTE_KEY + conv, true)
+  else await $.store.delete(MUTE_KEY + conv)
+  muted = await loadFlags($, MUTE_KEY, 'muted')
   await touchState($, 'muted')
   void syncState($).catch(() => {})
   $.ui.invalidate('ui.render')
@@ -810,11 +876,8 @@ async function receiveSelf($: EngineInterface, p: SelfPayload) {
 
 // Lists merge entry by entry, the newer change winning; a removal wins over older entries.
 async function mergeState($: EngineInterface, st: SyncState, fromPrimary: boolean) {
-  const theirGone = numberMap(st.gone)
-  const saved = numberMap(await $.store.get('gone'))
-  for (const [id, at] of Object.entries(theirGone)) if (at > (saved[id] ?? 0)) saved[id] = at
-  gone = saved
-  await $.store.set('gone', gone)
+  for (const [id, at] of Object.entries(numberMap(st.gone))) await raiseGone($, id, at)
+  gone = await loadGone($)
   const alive = <T extends { id: string; changed?: number }>(x: T) => !(gone[x.id] && gone[x.id]! >= (x.changed ?? 0))
 
   const theirContacts = asArray<unknown>(st.contacts).map(cleanContact).filter((c): c is Contact => !!c)
@@ -838,8 +901,8 @@ async function mergeState($: EngineInterface, st: SyncState, fromPrimary: boolea
 
   const at = numberMap(st.at)
   if ((at.blocked ?? 0) > stateAt.blocked) {
-    blocked = idList(st.blocked)
-    await $.store.set('blocked', blocked)
+    await replaceFlags($, BLOCK_KEY, idList(st.blocked))
+    blocked = await loadFlags($, BLOCK_KEY, 'blocked')
   }
   if ((at.profile ?? 0) > stateAt.profile) {
     profile = cleanProfile(st.profile)
@@ -847,8 +910,8 @@ async function mergeState($: EngineInterface, st: SyncState, fromPrimary: boolea
     await $.store.set('profileSent', JSON.stringify(profile))
   }
   if ((at.muted ?? 0) > stateAt.muted) {
-    muted = asArray<unknown>(st.muted).filter((c): c is string => typeof c === 'string' && CONV_RE.test(c))
-    await $.store.set('muted', muted)
+    await replaceFlags($, MUTE_KEY, asArray<unknown>(st.muted).filter((c): c is string => typeof c === 'string' && CONV_RE.test(c)))
+    muted = await loadFlags($, MUTE_KEY, 'muted')
   }
   if ((at.privacy ?? 0) > stateAt.privacy && st.privacy && typeof st.privacy === 'object') {
     privacy = cleanPrivacy(st.privacy)
@@ -940,7 +1003,9 @@ async function resetAccount($: EngineInterface, entropy?: Uint8Array) {
     'linked', 'primary', 'devices', 'profile', 'profileSent', 'notices', 'typing', 'linkPending', 'activeAt']) {
     await $.store.delete(key)
   }
-  for (const key of await $.store.keys()) if (key.startsWith(CONTACT_KEY) || key.startsWith(GROUP_KEY)) await $.store.delete(key)
+  for (const key of await $.store.keys()) if (KEYED.some(p => key.startsWith(p))) await $.store.delete(key)
+  await $.store.delete('inboxRev')
+  inboxRev = {}
   sharedKeys.clear()
   hybridKeys.clear()
   topics.clear()
@@ -1116,16 +1181,17 @@ async function applySnapshot($: EngineInterface, value: unknown, fromBackup = fa
   const now = await $.clock.now()
   const msgs = asArray<unknown>(snap.inbox).map(cleanMsg).filter((m): m is Msg => !!m)
   for (const m of msgs) shown.add(m.key)
-  for (const key of await $.store.keys()) if (key.startsWith(CONTACT_KEY) || key.startsWith(GROUP_KEY)) await $.store.delete(key)
-  await $.store.delete('contacts')
-  await $.store.delete('groups')
+  for (const key of await $.store.keys()) if (KEYED.some(p => key.startsWith(p))) await $.store.delete(key)
+  for (const key of ['contacts', 'groups', 'inbox', 'blocked', 'gone', 'muted']) await $.store.delete(key)
   for (const c of asArray<unknown>(snap.contacts).map(cleanContact)) if (c) await $.store.set(CONTACT_KEY + c.id, c)
   for (const g of asArray<unknown>(snap.groups).map(cleanGroup)) if (g) await $.store.set(GROUP_KEY + g.id, g)
-  await $.store.set('inbox', msgs)
-  await $.store.set('blocked', idList(snap.blocked))
-  await $.store.set('gone', numberMap(snap.gone))
+  for (const m of msgs) await $.store.set(MSG_KEY + m.key, m)
+  await bumpInbox($)
+  inboxRev = {}
+  for (const id of idList(snap.blocked)) await $.store.set(BLOCK_KEY + id, true)
+  for (const [id, at] of Object.entries(numberMap(snap.gone))) await $.store.set(GONE_KEY + id, at)
   await $.store.set('readAt', numberMap(snap.readAt))
-  await $.store.set('muted', asArray<unknown>(snap.muted).filter((c): c is string => typeof c === 'string' && CONV_RE.test(c)))
+  for (const c of asArray<unknown>(snap.muted)) if (typeof c === 'string' && CONV_RE.test(c)) await $.store.set(MUTE_KEY + c, true)
   const p = cleanProfile(snap.profile)
   await $.store.set('profile', p)
   await $.store.set('profileSent', JSON.stringify(p))
@@ -1722,20 +1788,24 @@ async function refresh($: EngineInterface, quiet = false) {
   lang = isLang(savedLang) ? savedLang : 'en'
   profile = cleanProfile(await $.store.get('profile'))
   contacts = await loadContacts($)
-  blocked = asArray<string>(await $.store.get('blocked'))
+  blocked = await loadFlags($, BLOCK_KEY, 'blocked')
   groups = await loadGroups($)
-  inbox = asArray<Msg>(await $.store.get('inbox'))
+  const rev = await $.store.get('inboxRev')
+  if (rev === undefined || rev !== inboxRev) {
+    inbox = await loadInbox($)
+    inboxRev = rev ?? {}
+  }
   const savedRead = await $.store.get('readAt')
   readAt = savedRead && typeof savedRead === 'object' ? (savedRead as Record<string, number>) : {}
   status = (await $.store.get('status')) as Status | undefined
   const savedPrivacy = (await $.store.get('privacy')) as Partial<Privacy> | undefined
   privacy = cleanPrivacy(savedPrivacy)
-  muted = asArray<string>(await $.store.get('muted'))
+  muted = await loadFlags($, MUTE_KEY, 'muted')
   primary = (await $.store.get('primary')) !== false
   const savedDevices = await $.store.get('devices')
   devices = savedDevices && typeof savedDevices === 'object' ? (savedDevices as Record<string, Device>) : {}
   linked = (await $.store.get('linked')) === true
-  gone = numberMap(await $.store.get('gone'))
+  gone = await loadGone($)
   stateAt = { blocked: 0, profile: 0, muted: 0, privacy: 0, ...numberMap(await $.store.get('stateAt')) }
   const savedDir = await $.store.get('backupDir')
   backupDir = typeof savedDir === 'string' ? savedDir : ''
@@ -2031,7 +2101,9 @@ async function sendText($: EngineInterface, conv: string, text: string, file?: F
   const result = await fanOut($, conv, () =>
     group ? { t: 'group', id, g: group.id, name: myPublicName(), text, ...(file ? { file } : {}) } : { t: 'dm', id, name: myPublicName(), text, ...(file ? { file } : {}) })
   if (result.error) {
-    inbox = await mutate<Msg>($, 'inbox', current => current.filter(m => m.key !== id))
+    await $.store.delete(MSG_KEY + id)
+    inbox = inbox.filter(m => m.key !== id)
+    await bumpInbox($)
     $.ui.invalidate('ui.render')
     return { ok: false, text: result.error }
   }
@@ -2071,7 +2143,10 @@ async function confirm($: EngineInterface, question: string, yes: string): Promi
 
 async function addContact($: EngineInterface, id: string, nickname = ''): Promise<string> {
   if (!validId(id)) return id === me ? t('ownId') : t('badId')
-  if (blocked.includes(id)) blocked = await mutate<string>($, 'blocked', cur => cur.filter(b => b !== id))
+  if (blocked.includes(id)) {
+    await $.store.delete(BLOCK_KEY + id)
+    blocked = blocked.filter(b => b !== id)
+  }
   const c = contactOf(id)
   const nick = cleanText(nickname, 40) || c?.nickname
   if (c?.state === 'friend') {
@@ -2111,7 +2186,8 @@ async function unfriend($: EngineInterface, id: string) {
 
 // Blocking is silent: the other side is not told; their messages and requests are dropped here.
 async function block($: EngineInterface, id: string) {
-  blocked = await mutate<string>($, 'blocked', cur => [...cur.filter(b => b !== id), id])
+  await $.store.set(BLOCK_KEY + id, true)
+  blocked = [...blocked.filter(b => b !== id), id]
   await touchState($, 'blocked')
   await dropContact($, id)
   void syncState($).catch(() => {})
@@ -2119,7 +2195,8 @@ async function block($: EngineInterface, id: string) {
 }
 
 async function unblock($: EngineInterface, id: string) {
-  blocked = await mutate<string>($, 'blocked', cur => cur.filter(b => b !== id))
+  await $.store.delete(BLOCK_KEY + id)
+  blocked = blocked.filter(b => b !== id)
   await touchState($, 'blocked')
   void syncState($).catch(() => {})
   $.ui.invalidate('ui.render')
@@ -3326,7 +3403,8 @@ export const register: Register = on => {
         {copyButton}
         <Button key={'fwd-' + m.key} label={graphic ? t('forwardButton') : '↗'} plain dimColor={!marked} hotkey={marked ? 'f' : undefined}
           onPress={async () => {
-            inbox = await mutate<Msg>($, 'inbox', cur => cur.map(x => (x.key === m.key ? { ...x, forwarded: true } : x)))
+            await updateStored($, m.key, x => ({ ...x, forwarded: true }))
+            await bumpInbox($)
             redraw()
             const name = nameOf(m.from, m.name)
             // A fence longer than any backtick run in the text, so the message cannot close it and write as the person.

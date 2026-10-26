@@ -1539,3 +1539,33 @@ test('a forwarded message is fenced so it cannot write as the person, and /buddy
   expect(r.text).toBe('Kullanıcı onaylamadı, mesaj gönderilmedi.')
   expect(w.posts.length).toBe(posts)
 })
+
+test('a message another session writes while this session writes its own is kept', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const store = new Map<string, unknown>(Object.entries({ ...V4, contacts: [friend(ahmet, 'Ahmet')] }))
+  let other: (() => void) | undefined
+  on('store.get', (_, e) => {
+    const value = store.get((e as { key: string }).key)
+    return { value: value === undefined ? undefined : JSON.parse(JSON.stringify(value)) } as never
+  })
+  on('store.set', (_, e) => {
+    const { key, value } = e as { key: string; value: unknown }
+    // Another session commits its own write right before this session's lands.
+    if (other && key.startsWith('msg:')) {
+      const run = other
+      other = undefined
+      run()
+    }
+    store.set(key, JSON.parse(JSON.stringify(value)))
+    return { value: undefined } as never
+  })
+  on('store.delete', (_, e) => { store.delete((e as { key: string }).key); return { value: undefined } as never })
+  on('store.keys', () => ({ value: [...store.keys()] }) as never)
+  setup(on, undefined)
+  await start($)
+
+  other = () => store.set('msg:theirs000000000', { key: 'theirs000000000', conv: 'dm:' + idOf(ahmet), from: idOf(ahmet), name: 'A', text: 'onlarınki', at: 1, mine: false })
+  await run($, 'buddy-send', 'Ahmet benimki')
+  const texts = [...store.keys()].filter(k => k.startsWith('msg:')).map(k => (store.get(k) as { text: string }).text)
+  expect(texts).toEqual(expect.arrayContaining(['onlarınki', 'benimki']))
+})
