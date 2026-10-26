@@ -1202,8 +1202,9 @@ test('recovery: a new identity has 12 words that make the same keys; an older on
   expect(words.length).toBe(12)
   const entropy = fromWords(words.join(' '))!
   expect(b64(nacl.box.keyPair.fromSecretKey(keysFromEntropy(entropy).secretKey).publicKey)).toBe(me)
-  // One wrong word fails the checksum or the list.
-  expect(fromWords([...words.slice(0, 11), words[11] === 'zoo' ? 'abandon' : 'zoo'].join(' '))).toBeUndefined()
+  // A wrong last word fails the 4-bit checksum, except one word in 16 by chance; of five tries at least one fails.
+  const tries = ['zoo', 'abandon', 'ability', 'able', 'about'].filter(x => x !== words[11]).map(x => [...words.slice(0, 11), x].join(' '))
+  expect(tries.some(x => fromWords(x) === undefined)).toBe(true)
   await ui.unmount()
 })
 
@@ -1601,4 +1602,33 @@ test('a box sent back to its sender, played again, or carrying an unsafe id is d
   expect(texts).not.toContain('damgasız')
   expect(texts).not.toContain('kaçış')
   await ui.unmount()
+})
+
+test('a send cut short is not left "sending", and loading a backup into a used account keeps what came after it', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const mine = nacl.box.keyPair()
+  const files = new Map<string, string>()
+  memoryFs(on, files)
+  const conv = 'dm:' + idOf(ahmet)
+  const stuck = { key: 'st00000000000001', conv, from: idOf(mine), name: 'Ben', text: 'yarım kaldı', at: 1_000, mine: true, dev: 'dev1', state: 'sending' }
+  const newer = { key: 'nw00000000000001', conv, from: idOf(ahmet), name: 'A', text: 'yedekten sonra', at: 5_000, mine: false }
+  const w = setup(on, { ...V4, secretKey: b64(mine.secretKey), deviceId: 'dev1', contacts: [friend(ahmet, 'Ahmet')], inbox: [stuck, newer] })
+  await start($)
+  await w.clock.advance(8000)
+
+  const snap = {
+    v: 1, secretKey: b64(mine.secretKey), lastSeen: 'ev1', lang: 'tr', contacts: [friend(ahmet, 'Ahmet')], groups: [], gone: {}, blocked: [],
+    profile: { username: '', displayName: '' }, muted: [], privacy: {}, readAt: {}, at: {},
+    inbox: [{ key: 'od00000000000001', conv, from: idOf(ahmet), name: 'A', text: 'yedekteki', at: 500, mine: false }],
+  }
+  const nonce = nacl.randomBytes(24)
+  files.set('/home/test/old/account.backup', JSON.stringify({ v: 1, kind: 'buddy-chat-backup', id: idOf(mine), nonce: b64(nonce), box: b64(nacl.secretbox(enc(JSON.stringify(snap)), nonce, backupKey(mine.secretKey))) }))
+  expect((await run($, 'buddy-backup', 'load ~/old')).text).toContain('Yedek yüklendi')
+  const view = await $.ui.mount(pane('terminal'))
+  await openChat(view, 'conv-' + conv)
+  const texts = (await view.findAll({ type: 'Text' } as never) as { text?: string }[]).map(x => x.text ?? '').join('\n')
+  expect(texts).toContain('yedekteki')
+  expect(texts).toContain('yedekten sonra')
+  expect(texts).not.toContain('◷')
+  await view.unmount()
 })

@@ -37,6 +37,7 @@ const SAFE_ID_RE = /^[A-Za-z0-9]{1,32}$/
 const MAX_REFS = 60
 // ntfy keeps a message 12 hours; a message nobody confirmed goes out again before that, for up to a week.
 const RETRY_MS = 11 * 3_600_000
+const SENDING_STALE_MS = 2 * 60_000
 const RETRY_MAX_MS = 7 * 86_400_000
 const RETRY_PER_TICK = 5
 // Linked devices: a device back after this long asks the others for what it missed.
@@ -54,6 +55,10 @@ const BACKOFF_MS = 60_000
 // ntfy turns a body over 4096 bytes into an attachment, which the poller cannot read.
 const MAX_BODY_BYTES = 3800
 const MAX_GROUP = 8
+// Caps on what other people can make this side store: open friend requests, groups, and how long a removal is kept.
+const MAX_INCOMING = 50
+const MAX_GROUPS = 50
+const GONE_TTL_MS = 180 * 86_400_000
 const ID_RE = /^[A-Za-z0-9_-]{43}$/
 const GROUP_RE = /^[0-9a-f]{16}$/
 const USERNAME_RE = /^[a-z0-9_.]{2,24}$/
@@ -100,6 +105,8 @@ type Msg = {
   state?: 'sending'
   deliveredTo?: string[]
   readBy?: string[]
+  // Mine: who it went to, so a receipt counts only from them, not from someone who joined the group later.
+  to?: string[]
   // Theirs: shown in an open chat, so its read receipt is sent (or, with receipts off, never will be).
   seen?: boolean
   // Mine: the device that sent it, and when it last went out again.
@@ -181,7 +188,9 @@ let linked = false
 let gone: Record<string, number> = {}
 let stateAt: SyncState['at'] = { blocked: 0, profile: 0, muted: 0, privacy: 0 }
 let linkPending: { secret: string; until: number } | undefined
-const parts = new Map<string, string[]>()
+// Parts of a long self payload, by set; a set that never completes (a part was lost) is dropped after PARTS_TTL_MS.
+const parts = new Map<string, { got: string[]; at: number }>()
+const PARTS_TTL_MS = 10 * 60_000
 let currentStream: { return?: () => unknown } | undefined
 // Linking progress, shown in every session's status line and Devices card; linkTimer polls fast while a code waits.
 // The devices linked to this identity, this one included, as each last announced itself.
@@ -223,6 +232,7 @@ let usageAt = 0
 let groupSeq = 0
 let pollerAt = 0
 let storeWarned = false
+let backupWarned = false
 // Terminal: the message j/k marked; its actions take one key (e, x, f). Empty: no mark.
 let cursor = ''
 // The chat fills the pane's height with the composer at the bottom, so it pages instead of scrolling the pane.
@@ -446,11 +456,17 @@ const keysWith = async ($: EngineInterface, prefix: string) => (await $.store.ke
 
 async function loadKeyed<T extends object>($: EngineInterface, prefix: string, legacyKey: string, idOfRecord: (x: T) => unknown): Promise<T[]> {
   // Before 0.20.3 each list was one array; its entries move to their own keys, and a key already there wins.
+  // An older plugin version in another session may still write the array: its entry wins only where it changed later,
+  // and an entry removed since does not come back.
   const legacy = await $.store.get(legacyKey)
   if (Array.isArray(legacy)) {
-    for (const x of legacy as T[]) {
+    for (const x of legacy as (T & { changed?: number })[]) {
       const id = x && typeof x === 'object' ? idOfRecord(x) : undefined
-      if (typeof id === 'string' && (await $.store.get(prefix + id)) === undefined) await $.store.set(prefix + id, x)
+      if (typeof id !== 'string') continue
+      const removed = await $.store.get(GONE_KEY + id)
+      if (typeof removed === 'number' && removed >= (x.changed ?? 0)) continue
+      const have = (await $.store.get(prefix + id)) as { changed?: number } | undefined
+      if (have === undefined || (x.changed ?? 0) > (have.changed ?? 0)) await $.store.set(prefix + id, x)
     }
     await $.store.delete(legacyKey)
   }
@@ -488,9 +504,11 @@ async function loadGone($: EngineInterface): Promise<Record<string, number>> {
   for (const [id, at] of Object.entries(legacy)) await raiseGone($, id, at)
   await $.store.delete('gone')
   const out: Record<string, number> = {}
+  const now = await $.clock.now()
   for (const key of await keysWith($, GONE_KEY)) {
     const at = await $.store.get(key)
-    if (typeof at === 'number') out[key.slice(GONE_KEY.length)] = at
+    if (typeof at === 'number' && now - at < GONE_TTL_MS) out[key.slice(GONE_KEY.length)] = at
+    else await $.store.delete(key)
   }
   return out
 }
@@ -535,9 +553,16 @@ async function markGone($: EngineInterface, id: string) {
   gone = { ...gone, [id]: Math.max(gone[id] ?? 0, at) }
 }
 
+// A map of times kept by key: each time only moves forward, read fresh, so another session's later mark stays.
+async function raiseTimes($: EngineInterface, key: string, patch: Record<string, number>): Promise<Record<string, number>> {
+  const merged = numberMap(await $.store.get(key))
+  for (const [k, at] of Object.entries(patch)) if (at > (merged[k] ?? 0)) merged[k] = at
+  await $.store.set(key, merged)
+  return merged
+}
+
 async function touchState($: EngineInterface, field: keyof SyncState['at']) {
-  stateAt = { ...stateAt, [field]: await $.clock.now() }
-  await $.store.set('stateAt', stateAt)
+  stateAt = { blocked: 0, profile: 0, muted: 0, privacy: 0, ...(await raiseTimes($, 'stateAt', { [field]: await $.clock.now() })) }
 }
 
 async function addMessages($: EngineInterface, msgs: Msg[]) {
@@ -675,7 +700,7 @@ async function ackMessages($: EngineInterface, from: string, kind: ReceiptKind, 
   let changed = false
   for (const ref of new Set(refs)) {
     changed = (await updateStored($, ref, m => {
-      if (!m.mine || !recipients(m.conv).some(r => r.id === from)) return undefined
+      if (!m.mine || !(m.to ?? recipients(m.conv).map(r => r.id)).includes(from)) return undefined
       const deliveredTo = m.deliveredTo?.includes(from) ? m.deliveredTo : [...(m.deliveredTo ?? []), from]
       const readBy = kind !== 'read' || m.readBy?.includes(from) ? m.readBy : [...(m.readBy ?? []), from]
       return { ...m, deliveredTo, readBy }
@@ -757,6 +782,7 @@ function cleanMsg(value: unknown): Msg | undefined {
     ...(m.seen ? { seen: true } : {}),
     ...(m.deliveredTo ? { deliveredTo: idList(m.deliveredTo) } : {}),
     ...(m.readBy ? { readBy: idList(m.readBy) } : {}),
+    ...(m.to ? { to: idList(m.to) } : {}),
     ...(typeof m.dev === 'string' ? { dev: m.dev.slice(0, 32) } : {}),
     ...(cleanFile(m.file) ? { file: cleanFile(m.file)! } : {}),
   }
@@ -794,18 +820,42 @@ function numberMap(value: unknown): Record<string, number> {
 const currentState = (): SyncState => ({ contacts, groups, gone, blocked, profile, muted, privacy, readAt, at: stateAt })
 
 // Seals a payload for our own topic. A long one goes in parts that the other devices put back together.
-async function postSelf($: EngineInterface, payload: Omit<SelfPayload, 't' | 'id' | 'dev'>) {
+// Resolves to the first failure, so a caller does not report as sent what did not go out.
+async function postSelf($: EngineInterface, payload: Omit<SelfPayload, 't' | 'id' | 'dev'>): Promise<PostError | undefined> {
   const full: SelfPayload = { t: 'self', id: newId(), dev: deviceId, ...payload }
   const json = JSON.stringify(full)
-  if (json.length <= PART_CHARS) {
-    await post($, me, full)
-    return
-  }
+  if (json.length <= PART_CHARS) return post($, me, full)
   const set = newId()
   const n = Math.ceil(json.length / PART_CHARS)
   for (let i = 0; i < n; i++) {
-    await post($, me, { t: 'self', id: newId(), dev: deviceId, kind: 'part', set, i, n, data: json.slice(i * PART_CHARS, (i + 1) * PART_CHARS) })
+    const err = await post($, me, { t: 'self', id: newId(), dev: deviceId, kind: 'part', set, i, n, data: json.slice(i * PART_CHARS, (i + 1) * PART_CHARS) })
+    if (err) return err
   }
+  return undefined
+}
+
+// Another device's copies: new ones are added; one this device has already takes what the copy knows that it does not
+// (a delete, an edit, a delivery, the end of sending), so a device that was away catches up on changes too.
+async function addOrMerge($: EngineInterface, msgs: Msg[]) {
+  const fresh: Msg[] = []
+  let changed = false
+  for (const m of msgs) {
+    if ((await $.store.get(MSG_KEY + m.key)) === undefined) {
+      fresh.push(m)
+      continue
+    }
+    changed = (await updateStored($, m.key, cur => ({
+      ...cur,
+      ...(m.deleted ? { text: '', deleted: true } : m.edited && !cur.deleted ? { text: m.text, edited: true } : {}),
+      deliveredTo: [...new Set([...(cur.deliveredTo ?? []), ...(m.deliveredTo ?? [])])],
+      readBy: [...new Set([...(cur.readBy ?? []), ...(m.readBy ?? [])])],
+      state: cur.state && !m.state ? undefined : cur.state,
+      ...(m.forwarded || cur.forwarded ? { forwarded: true } : {}),
+      ...(m.seen || cur.seen ? { seen: true } : {}),
+    }))) || changed
+  }
+  if (changed) await bumpInbox($)
+  await addMessages($, fresh)
 }
 
 async function syncState($: EngineInterface) {
@@ -819,9 +869,11 @@ async function receiveSelf($: EngineInterface, p: SelfPayload) {
       const { set, i, n, data } = p
       if (typeof set !== 'string' || typeof data !== 'string' || !Number.isInteger(i) || !Number.isInteger(n)) return
       if (n! < 1 || n! > 200 || i! < 0 || i! >= n!) return
-      const got = parts.get(set) ?? Array.from({ length: n! }, () => '')
+      const now = await $.clock.now()
+      for (const [k, v] of parts) if (now - v.at > PARTS_TTL_MS) parts.delete(k)
+      const got = parts.get(set)?.got ?? Array.from({ length: n! }, () => '')
       got[i!] = data
-      parts.set(set, got)
+      parts.set(set, { got, at: parts.get(set)?.at ?? now })
       if (got.some(x => !x)) return
       parts.delete(set)
       let whole: SelfPayload
@@ -833,7 +885,7 @@ async function receiveSelf($: EngineInterface, p: SelfPayload) {
       const m = cleanMsg(p.msg)
       if (m?.mine) {
         shown.add(m.key)
-        await addMessages($, [m])
+        await addOrMerge($, [m])
       }
       return
     }
@@ -880,7 +932,7 @@ async function receiveSelf($: EngineInterface, p: SelfPayload) {
       const msgs = asArray<unknown>(p.msgs).map(cleanMsg).filter((m): m is Msg => !!m)
       // What another device kept while this one was away is history here, not news.
       for (const m of msgs) shown.add(m.key)
-      await addMessages($, msgs)
+      await addOrMerge($, msgs)
       if (p.state) await mergeState($, p.state, p.primary === true)
       return
     }
@@ -935,11 +987,7 @@ async function mergeState($: EngineInterface, st: SyncState, fromPrimary: boolea
     muted: Math.max(stateAt.muted, at.muted ?? 0), privacy: Math.max(stateAt.privacy, at.privacy ?? 0),
   }
   await $.store.set('stateAt', stateAt)
-  const theirRead = numberMap(st.readAt)
-  const marks = { ...readAt }
-  for (const [conv, when] of Object.entries(theirRead)) if (CONV_RE.test(conv) && when > (marks[conv] ?? 0)) marks[conv] = when
-  readAt = marks
-  await $.store.set('readAt', readAt)
+  readAt = await raiseTimes($, 'readAt', Object.fromEntries(Object.entries(numberMap(st.readAt)).filter(([conv]) => CONV_RE.test(conv))))
   $.ui.invalidate('ui.render')
 }
 
@@ -950,6 +998,13 @@ async function retryUnconfirmed($: EngineInterface) {
   let budget = RETRY_PER_TICK
   for (const m of inbox) {
     if (!budget) break
+    // A send this device started and never finished (the session closed mid-way) is no longer "sending": it goes to
+    // the retries below, and the other devices get their copy.
+    if (m.mine && m.state === 'sending' && m.dev === deviceId && now - m.at > SENDING_STALE_MS) {
+      await patchMessage($, m.key, me, { state: undefined })
+      if (linked) void postSelf($, { kind: 'sent', msg: { ...m, state: undefined } }).catch(() => {})
+      continue
+    }
     if (!m.mine || m.system || m.deleted || m.state || now - m.at > RETRY_MAX_MS || now - (m.tried ?? m.at) < RETRY_MS) continue
     if (m.dev ? m.dev !== deviceId : !primary) continue
     const targets = recipients(m.conv).filter(r => !m.deliveredTo?.includes(r.id) && contactOf(r.id)?.acks)
@@ -1019,6 +1074,9 @@ async function resetAccount($: EngineInterface, entropy?: Uint8Array) {
   for (const key of await $.store.keys()) if (KEYED.some(p => key.startsWith(p))) await $.store.delete(key)
   await $.store.delete('inboxRev')
   inboxRev = {}
+  // A new device id too, so a removal sent to the old one cannot be played against this device once it links again.
+  deviceId = newId()
+  await $.store.set('deviceId', deviceId)
   sharedKeys.clear()
   hybridKeys.clear()
   topics.clear()
@@ -1054,7 +1112,8 @@ async function removeDevice($: EngineInterface, dev: string): Promise<string> {
   const d = devices[dev]
   if (!d || dev === deviceId) return t('removeUnknown')
   if (!(await confirm($, t('removeConfirm', { name: d.name }), t('removeYes')))) return t('linkCancelled')
-  await postSelf($, { kind: 'bye', target: dev })
+  const err = await postSelf($, { kind: 'bye', target: dev })
+  if (err) return errorText(err)
   await saveDevice($, dev, undefined)
   return t('removeSent', { name: d.name })
 }
@@ -1462,6 +1521,15 @@ const filesIn = async ($: EngineInterface, path: string, ext: string) => {
   try { return (await $.fs.list(path)).filter(e => e.kind === 'file' && e.name.endsWith(ext)).map(e => e.name) } catch { return [] }
 }
 
+const backupIsWhole = async ($: EngineInterface, path: string) => {
+  try {
+    const file = JSON.parse(await $.fs.read(path)) as { kind?: string; box?: string }
+    return file?.kind === 'buddy-chat-backup' && typeof file.box === 'string'
+  } catch {
+    return false
+  }
+}
+
 async function writeBackup($: EngineInterface): Promise<string> {
   const dir = await $.store.get('backupDir')
   if (typeof dir !== 'string' || !dir) return t('backupOff')
@@ -1471,16 +1539,19 @@ async function writeBackup($: EngineInterface): Promise<string> {
     lastSeen: await $.store.get('lastSeen'), lang, ...currentState(), inbox: [...inbox],
   }
   try {
-    await $.fs.write(root + '/account.backup', sealBackup(JSON.stringify(snapshot)))
-    // Archived files never change, so only the ones the backup does not have yet are copied.
+    // The copy goes next to the last one first, so a write cut short never leaves the folder without a good copy.
+    const sealed = sealBackup(JSON.stringify(snapshot))
+    await $.fs.write(root + '/account.backup.new', sealed)
+    await $.fs.write(root + '/account.backup', sealed)
+    // Archived files never change, so only the ones the backup does not hold whole yet are copied.
     const history = await historyDir($)
     if (history) {
       for (const conv of await dirsIn($, history)) {
         const have = new Set(await filesIn($, root + '/history/' + conv, '.backup'))
         for (const name of await filesIn($, history + '/' + conv, '.json')) {
-          const target = name.replace(/\.json$/, '.backup')
-          if (have.has(target)) continue
-          await $.fs.write(root + '/history/' + conv + '/' + target, sealBackup(await $.fs.read(history + '/' + conv + '/' + name)))
+          const target = root + '/history/' + conv + '/' + name.replace(/\.json$/, '.backup')
+          if (have.has(target.slice(target.lastIndexOf('/') + 1)) && (await backupIsWhole($, target))) continue
+          await $.fs.write(target, sealBackup(await $.fs.read(history + '/' + conv + '/' + name)))
         }
       }
     }
@@ -1510,8 +1581,16 @@ async function backupIfDue($: EngineInterface, now: number) {
   if (typeof dir !== 'string' || !dir) return
   const at = Number(await $.store.get('backupAt')) || 0
   if (now - at < BACKUP_EVERY_MS || signature === backupSignature) return
-  backupSignature = signature
-  await writeBackup($)
+  const before = Number(await $.store.get('backupAt')) || 0
+  const result = await writeBackup($)
+  // Only a backup that was written counts; a failed one is tried again on the next tick and said once.
+  if ((Number(await $.store.get('backupAt')) || 0) > before) {
+    backupSignature = signature
+    backupWarned = false
+  } else if (!backupWarned) {
+    backupWarned = true
+    $.ui.toast(result)
+  }
 }
 
 // Takes the backup folder, its account.backup, or the folder it was written into.
@@ -1521,15 +1600,29 @@ async function loadBackup($: EngineInterface, path: string): Promise<string> {
   let root = ''
   let text: string | 'other' | undefined
   for (const candidate of roots) {
-    try { text = openBackup(await $.fs.read(candidate + '/account.backup')) } catch { continue }
-    root = candidate
-    break
+    for (const name of ['/account.backup', '/account.backup.new']) {
+      try { text = openBackup(await $.fs.read(candidate + name)) } catch { continue }
+      if (!text) continue
+      root = candidate
+      break
+    }
+    if (root) break
   }
   if (text === 'other') return t('backupOtherAccount')
   if (!text) return t('backupUnreadable')
   let snapshot: unknown
   try { snapshot = JSON.parse(text) } catch { return t('backupUnreadable') }
-  if (!(await applySnapshot($, snapshot, true))) return t('backupUnreadable')
+  if (!snapshot || typeof snapshot !== 'object') return t('backupUnreadable')
+  // An empty account takes the backup whole. One in use merges it, so nothing made since the backup is lost.
+  if (!contacts.length && !inbox.length) {
+    if (!(await applySnapshot($, snapshot, true))) return t('backupUnreadable')
+  } else {
+    const snap = snapshot as SyncState & { inbox?: unknown }
+    for (const m of asArray<unknown>(snap.inbox).map(cleanMsg)) if (m) shown.add(m.key)
+    await addOrMerge($, asArray<unknown>(snap.inbox).map(cleanMsg).filter((m): m is Msg => !!m))
+    await mergeState($, { ...snap, at: numberMap(snap.at) as SyncState['at'] }, false)
+    await refresh($, true)
+  }
 
   const history = await historyDir($)
   let restored = 0
@@ -1712,6 +1805,8 @@ async function receiveOpened($: EngineInterface, env: Envelope, p: Payload, hybr
           notify($, 'buddy-chat', t('notifyNowFriends', { name: nameOf(env.from) }))
         }
       } else {
+        // Past the cap a new stranger's request is dropped, so keys made up by the thousand cannot fill the store.
+        if (!c && contacts.filter(x => x.state === 'incoming').length >= MAX_INCOMING) return
         await saveContact($, { id: env.from, state: 'incoming', profile: theirs, nickname: c?.nickname, at })
         if (!c) notify($, 'buddy-chat', t('notifyWantsToAdd', { name: ownName(theirs) || shortId(env.from) }))
       }
@@ -1804,6 +1899,7 @@ async function receiveOpened($: EngineInterface, env: Envelope, p: Payload, hybr
   if (p.t === 'invite') {
     if (c?.state !== 'friend') return
     if (group && group.owner !== env.from) return
+    if (!group && groups.length >= MAX_GROUPS) return
     const name = nameOf(env.from)
     const members = cleanMembers(p.members)
     if (!members.some(m => m.id === me)) {
@@ -1839,6 +1935,20 @@ async function receiveOpened($: EngineInterface, env: Envelope, p: Payload, hybr
 
 // quiet: on session start, what is already stored counts as seen, so a new session does not toast old messages.
 async function refresh($: EngineInterface, quiet = false) {
+  // Another session may have switched the account (a link, recovery words, a removal); this one follows it.
+  const savedSecret = await $.store.get('secretKey')
+  if (keys && typeof savedSecret === 'string' && savedSecret !== b64(keys.secretKey)) {
+    keys = undefined
+    sharedKeys.clear()
+    hybridKeys.clear()
+    topics.clear()
+    forgetHistory()
+    inboxRev = {}
+    currentStream?.return?.()
+    await loadIdentity($)
+  }
+  const savedDevice = await $.store.get('deviceId')
+  if (typeof savedDevice === 'string') deviceId = savedDevice
   const savedLang = await $.store.get('lang')
   lang = isLang(savedLang) ? savedLang : 'en'
   profile = cleanProfile(await $.store.get('profile'))
@@ -2049,11 +2159,13 @@ async function tick($: EngineInterface) {
         await refresh($)
       }
       await pollLink($)
+      // A catch-up request that did not go out leaves activeAt as it was, so the next tick asks again.
+      let asked = true
       if (linked) {
         const last = Number(await $.store.get('activeAt')) || 0
-        if (now - last > CATCHUP_GAP_MS) await postSelf($, { kind: 'want', since: Math.max(0, last - 60_000) })
+        if (now - last > CATCHUP_GAP_MS) asked = !(await postSelf($, { kind: 'want', since: Math.max(0, last - 60_000) }))
       }
-      await $.store.set('activeAt', now)
+      if (asked) await $.store.set('activeAt', now)
       await retryUnconfirmed($)
       await backupIfDue($, now)
     })
@@ -2158,7 +2270,10 @@ async function sendText($: EngineInterface, conv: string, text: string, file?: F
   const group = groups.find(g => groupConv(g.id) === conv)
   shown.add(id)
   typingSentAt.delete(conv)
-  const msg: Msg = { key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true, dev: deviceId, ...(file ? { file } : {}) }
+  const msg: Msg = {
+    key: id, conv, from: me, name: myPublicName(), text, at: await $.clock.now(), mine: true, dev: deviceId,
+    to: recipients(conv).map(r => r.id), ...(file ? { file } : {}),
+  }
   await addMessages($, [{ ...msg, state: 'sending', ...(savedPath ? { saved: savedPath } : {}) }])
   newerSkip = 0
   $.ui.invalidate('ui.render')
@@ -2356,9 +2471,9 @@ async function leaveGroup($: EngineInterface, group: Group) {
 
 async function select($: EngineInterface, conv: string) {
   const now = await $.clock.now()
-  const marks = { ...readAt, [conv]: now }
+  const marks: Record<string, number> = { [conv]: now }
   if (selected) marks[selected] = now
-  readAt = marks
+  readAt = { ...readAt, ...marks }
   selected = conv
   editing = ''
   newerSkip = 0
@@ -2367,7 +2482,7 @@ async function select($: EngineInterface, conv: string) {
   threadOpen = true
   restedFor = ''
   composeRows = 2
-  await $.store.set('readAt', readAt)
+  readAt = await raiseTimes($, 'readAt', marks)
   $.ui.invalidate('ui.render')
 }
 
@@ -2401,8 +2516,7 @@ function pageBy($: EngineInterface, step: number) {
 
 async function closeThread($: EngineInterface) {
   if (selected) {
-    readAt = { ...readAt, [selected]: await $.clock.now() }
-    await $.store.set('readAt', readAt)
+    readAt = await raiseTimes($, 'readAt', { [selected]: await $.clock.now() })
   }
   threadOpen = false
   editing = ''
@@ -3492,7 +3606,7 @@ export const register: Register = on => {
     const ticks = (m: Msg) => {
       if (!m.mine || m.system || m.deleted) return null
       if (m.state === 'sending') return <Text size="caption" color={graphic ? MINE_SOFT : undefined} dimColor={!graphic}>{' ◷'}</Text>
-      const targets = recipients(m.conv).map(r => r.id)
+      const targets = m.to ?? recipients(m.conv).map(r => r.id)
       const all = (list?: string[]) => targets.length > 0 && targets.every(id => list?.includes(id))
       if (privacy.readReceipts && all(m.readBy)) return <Text size="caption" weight="bold" color={READ_COLOR}>{' ✓✓'}</Text>
       const mark = all(m.deliveredTo) ? ' ✓✓' : ' ✓'
