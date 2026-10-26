@@ -1188,13 +1188,16 @@ const MIME: Record<string, string> = {
 }
 const mimeOf = (name: string) => MIME[name.split('.').pop()?.toLowerCase() ?? ''] ?? 'application/octet-stream'
 const std64 = (bytes: Uint8Array) => b64(bytes).replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (b64(bytes).length % 4)) % 4)
-// A name safe to save under: no folders, no leading dot, no characters a file system refuses.
-const safeName = (name: string) => cleanText(name, 120).replace(/[\/\\:*?"<>|]/g, '_').replace(/^\.+/, '') || 'file'
+// A name safe to save under: no folders, no leading dot, no characters a file system refuses, no trailing dot or
+// space (Windows drops them, so "a.exe." would save as "a.exe"), and no direction marks that show "gnp.exe" as "exe.png".
+const safeName = (name: string) =>
+  cleanText(name.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, ''), 120).replace(/[\/\\:*?"<>|]/g, '_').replace(/^\.+/, '').replace(/[. ]+$/, '') || 'file'
 const sizeText = (n: number) => (n < 1024 * 1024 ? Math.max(1, Math.round(n / 1024)) + ' KB' : (n / 1024 / 1024).toFixed(1) + ' MB')
-// Files that run when opened. They are shown in the file manager, never opened, so a friend cannot start a program here.
-const RUNNABLE = new Set(['app', 'command', 'sh', 'bash', 'zsh', 'pkg', 'mpkg', 'dmg', 'exe', 'msi', 'bat', 'cmd', 'ps1', 'vbs', 'js',
-  'jar', 'scpt', 'applescript', 'workflow', 'terminal', 'py', 'rb', 'pl', 'php', 'deb', 'rpm', 'appimage', 'run', 'bin', 'lnk', 'url', 'webloc'])
-const isRunnable = (name: string) => RUNNABLE.has(name.split('.').pop()?.toLowerCase() ?? '')
+// Only these open with a click. Any other file is shown in the file manager, so a friend cannot start a program here:
+// a list of what runs misses some (.hta, .desktop, .mobileconfig, macros), a list of what only shows does not.
+const OPENABLE = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'bmp', 'tif', 'tiff', 'mp4', 'mov', 'm4v', 'webm',
+  'mp3', 'm4a', 'wav', 'ogg', 'aac', 'flac', 'pdf', 'txt', 'md', 'csv'])
+const isOpenable = (name: string) => OPENABLE.has(name.split('.').pop()?.toLowerCase() ?? '')
 const fileIcon = (mime: string) => (mime.startsWith('image/') ? '▧' : mime.startsWith('video/') ? '▶\uFE0E' : mime.startsWith('audio/') ? '♫' : '▤')
 
 function cleanFile(value: unknown): FileRef | undefined {
@@ -1235,7 +1238,7 @@ async function revealPath($: EngineInterface, path: string) {
 }
 
 async function openPath($: EngineInterface, path: string) {
-  if (isRunnable(path)) return revealPath($, path)
+  if (!isOpenable(path)) return revealPath($, path)
   for (const argv of [['open', path], ['xdg-open', path], ['cmd', '/c', 'start', '', path]]) {
     try {
       if ((await $.process.run(argv, { timeoutMs: 10_000 })).exitCode === 0) return
@@ -1286,12 +1289,19 @@ async function downloadFile($: EngineInterface, msg: Msg): Promise<boolean> {
   if (!home) return false
   const path = home + '/Downloads/buddy-chat/' + msg.key.slice(0, 6) + '-' + msg.file.name
   if (!(await writeBytes($, path, std64(plain)))) return false
-  // A file the browser downloads carries macOS's quarantine mark, so Gatekeeper asks before it runs; this one gets it too.
-  try {
-    const stamp = Math.floor((await $.clock.now()) / 1000).toString(16)
-    await $.process.run(['xattr', '-w', 'com.apple.quarantine', '0081;' + stamp + ';buddy-chat;', path], { timeoutMs: 10_000 })
-  } catch {
-    // not macOS
+  // A file the browser downloads carries the system's mark of a download (macOS quarantine, Windows Mark of the Web),
+  // so the system asks before it runs; this one gets it too.
+  const stamp = Math.floor((await $.clock.now()) / 1000).toString(16)
+  const marks = [
+    ['xattr', '-w', 'com.apple.quarantine', '0081;' + stamp + ';buddy-chat;', path],
+    ['powershell', '-NoProfile', '-Command', 'Set-Content -LiteralPath $args[0] -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"', path],
+  ]
+  for (const argv of marks) {
+    try {
+      if ((await $.process.run(argv, { timeoutMs: 10_000 })).exitCode === 0) break
+    } catch {
+      // not this system
+    }
   }
   await patchMessage($, msg.key, msg.from, { saved: path })
   $.ui.invalidate('ui.render')
@@ -2492,6 +2502,18 @@ export const register: Register = on => {
   on('command.run', { command: 'buddy-send' }, async ($, e) => {
     const hit = matchConv(e.args)
     if (!hit || !hit.rest) return { text: t('usageSend') }
+    // Typed by the person, it sends; started any other way (a plugin, a relayed message), it asks first, as the tool does.
+    if (e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') {
+      const preview = hit.rest.length > 300 ? hit.rest.slice(0, 300) + '…' : hit.rest
+      const question = hit.conv.isGroup ? t('toolAskGroup', { title: hit.conv.title, text: preview }) : t('toolAskDm', { name: hit.conv.title, text: preview })
+      let answer = ''
+      try {
+        answer = await $.ui.ask(question, [t('toolSend'), t('toolDontSend')])
+      } catch {
+        // dismissed, or no one to ask
+      }
+      if (answer !== t('toolSend')) return { text: t('toolDeclined') }
+    }
     return { text: (await sendText($, hit.conv.id, hit.rest)).text }
   })
 
@@ -3277,8 +3299,11 @@ export const register: Register = on => {
             inbox = await mutate<Msg>($, 'inbox', cur => cur.map(x => (x.key === m.key ? { ...x, forwarded: true } : x)))
             redraw()
             const name = nameOf(m.from, m.name)
+            // A fence longer than any backtick run in the text, so the message cannot close it and write as the person.
+            const fence = '`'.repeat(Math.max(3, ...(m.text.match(/`+/g) ?? []).map(r => r.length + 1)))
+            const text = fence + '\n' + m.text + '\n' + fence
             void $.prompt.submit({
-              text: (group ? t('forwardGroup', { group: group.title, name, text: m.text }) : t('forwardDm', { name, text: m.text }))
+              text: (group ? t('forwardGroup', { group: group.title, name, text }) : t('forwardDm', { name, text }))
                 + (m.saved ? '\n\n' + t('forwardFile', { path: m.saved }) : ''),
             })
           }} />
@@ -3309,7 +3334,7 @@ export const register: Register = on => {
           {m.saved
             ? (
               <Box flexDirection="row" columnGap={1}>
-                {isRunnable(f.name)
+                {!isOpenable(f.name)
                   ? <Button key={'file-show-' + m.key} label={t('fileReveal')} plain onPress={() => revealPath($, m.saved!)} />
                   : <Button key={'file-open-' + m.key} label={t('fileOpen')} plain onPress={() => openPath($, m.saved!)} />}
                 {f.mime.startsWith('audio/') && <Button key={'file-play-' + m.key} label="▶" plain onPress={() => playFile($, m)} />}
