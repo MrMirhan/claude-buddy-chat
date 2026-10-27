@@ -185,7 +185,7 @@ The words do not hold contacts or messages. For those, select **Choose a backup 
 ## Update notes
 
 - Both people need the same features: receipts and typing need 0.10 or later on both sides, files 0.19 or later, and linked devices the same version on each device.
-- To 0.21 or later: contacts, groups, messages, blocks and mutes move to one storage key each on the first start. Update every Claude Code session on the computer; a session still on an older version can lose a change it makes.
+- To 0.21 or later: contacts, groups, messages, blocks and mutes move to one storage key each on the first start. The old lists stay, and a change that a session still on an older version writes to them is copied over too.
 - To 0.17 or later: an account made earlier keeps its keys and gets 24 recovery words. Accounts made from 0.17 on get 12.
 - From 0.4 to 0.5 or later: all data stays. The PQ handshake runs when both people have 0.5 or later.
 - From 0.3: your keys and friends stay. The names you gave friends become nicknames.

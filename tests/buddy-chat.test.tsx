@@ -1632,3 +1632,28 @@ test('a send cut short is not left "sending", and loading a backup into a used a
   expect(texts).not.toContain('◷')
   await view.unmount()
 })
+
+test('a contact an older version saves to the old list while this one copies it is kept', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const mehmet = nacl.box.keyPair()
+  const store = new Map<string, unknown>(Object.entries({ ...V4, contacts: [friend(ahmet, 'Ahmet')] }))
+  let overlap = true
+  on('store.get', (_, e) => {
+    const key = (e as { key: string }).key
+    const value = store.get(key)
+    // The older session writes its whole list right after this session first reads it.
+    if (overlap && key === 'contacts') {
+      overlap = false
+      store.set('contacts', [friend(ahmet, 'Ahmet'), friend(mehmet, 'Mehmet')])
+    }
+    return { value: value === undefined ? undefined : JSON.parse(JSON.stringify(value)) } as never
+  })
+  on('store.set', (_, e) => { const { key, value } = e as { key: string; value: unknown }; store.set(key, JSON.parse(JSON.stringify(value))); return { value: undefined } as never })
+  on('store.delete', (_, e) => { store.delete((e as { key: string }).key); return { value: undefined } as never })
+  on('store.keys', () => ({ value: [...store.keys()] }) as never)
+  const w = setup(on, undefined)
+  await start($)
+  await w.clock.advance(8000)
+  const ids = [...store.keys()].filter(k => k.startsWith('contact:')).map(k => k.slice('contact:'.length))
+  expect(ids).toEqual(expect.arrayContaining([idOf(ahmet), idOf(mehmet)]))
+})

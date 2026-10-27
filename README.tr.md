@@ -185,7 +185,7 @@ Kelimeler kişileri ve mesajları içermez. Onlar için aynı karttaki **Yedek k
 ## Güncelleme notları
 
 - Özellikler için iki tarafın da uygun sürümde olması gerekir: okundu bilgisi ve yazıyor için 0.10 ve sonrası, dosyalar için 0.19 ve sonrası, bağlı cihazlar için her cihazda aynı sürüm.
-- 0.21 ve sonrasına: kişiler, gruplar, mesajlar, engeller ve sessize alınanlar ilk açılışta her biri ayrı bir depolama anahtarına taşınır. Bilgisayardaki bütün Claude Code oturumlarını güncelle; eski sürümde kalan bir oturum yaptığı bir değişikliği kaybedebilir.
+- 0.21 ve sonrasına: kişiler, gruplar, mesajlar, engeller ve sessize alınanlar ilk açılışta her biri ayrı bir depolama anahtarına taşınır. Eski listeler silinmez; eski sürümde kalan bir oturumun onlara yazdığı değişiklik de taşınır.
 - 0.17 ve sonrasına: daha önce oluşmuş bir hesap anahtarlarını korur ve 24 kurtarma kelimesi alır. 0.17'den itibaren oluşan hesapların 12 kelimesi vardır.
 - 0.4'ten 0.5 ve sonrasına: bütün veriler kalır. İki taraf da 0.5 veya sonrasına geçince PQ el sıkışması yapılır.
 - 0.3'ten: anahtarların ve arkadaşların kalır. Arkadaşlarına verdiğin adlar takma ad olur.

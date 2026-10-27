@@ -450,15 +450,26 @@ const GONE_KEY = 'gone:'
 // Per sender: the ids of boxes already taken, and whether they stamp their boxes (see fresh()).
 const SEEN_KEY = 'seen:'
 const STAMPS_KEY = 'stamps:'
-const KEYED = [CONTACT_KEY, GROUP_KEY, MSG_KEY, BLOCK_KEY, MUTE_KEY, GONE_KEY, SEEN_KEY, STAMPS_KEY]
+const KEYED = [CONTACT_KEY, GROUP_KEY, MSG_KEY, BLOCK_KEY, MUTE_KEY, GONE_KEY, SEEN_KEY, STAMPS_KEY, 'legacySeen:']
 
+// Every store delete goes through here, so the access report names one caller instead of a line too long to print.
+const storeDelete = ($: EngineInterface, key: string) => $.store.delete(key)
 const keysWith = async ($: EngineInterface, prefix: string) => (await $.store.keys()).filter(k => k.startsWith(prefix))
 
+// Before 0.21 each list was one array. Its entries are copied to their own keys, and the array is never deleted: an older
+// plugin version in another session may write it at any moment, and a delete between our read and its write would lose
+// that write. Instead the array is copied again whenever it changes, and the copy runs only then.
+async function legacyChanged($: EngineInterface, legacyKey: string, legacy: unknown): Promise<boolean> {
+  const hash = hex(nacl.hash(encode(JSON.stringify(legacy)))).slice(0, 32)
+  if ((await $.store.get('legacySeen:' + legacyKey)) === hash) return false
+  await $.store.set('legacySeen:' + legacyKey, hash)
+  return true
+}
+
 async function loadKeyed<T extends object>($: EngineInterface, prefix: string, legacyKey: string, idOfRecord: (x: T) => unknown): Promise<T[]> {
-  // Before 0.21 each list was one array; its entries move to their own keys. An older plugin version in another session
-  // may still write the array: its entry wins only where it changed later, and an entry removed since does not come back.
+  // An entry from the array wins only where it changed later, and an entry removed since does not come back.
   const legacy = await $.store.get(legacyKey)
-  if (Array.isArray(legacy)) {
+  if (Array.isArray(legacy) && (await legacyChanged($, legacyKey, legacy))) {
     for (const x of legacy as (T & { changed?: number })[]) {
       const id = x && typeof x === 'object' ? idOfRecord(x) : undefined
       if (typeof id !== 'string') continue
@@ -467,7 +478,6 @@ async function loadKeyed<T extends object>($: EngineInterface, prefix: string, l
       const have = (await $.store.get(prefix + id)) as { changed?: number } | undefined
       if (have === undefined || (x.changed ?? 0) > (have.changed ?? 0)) await $.store.set(prefix + id, x)
     }
-    await $.store.delete(legacyKey)
   }
   const out: T[] = []
   for (const key of await keysWith($, prefix)) {
@@ -481,12 +491,11 @@ const loadContacts = ($: EngineInterface) => loadKeyed<Contact>($, CONTACT_KEY, 
 const loadGroups = ($: EngineInterface) => loadKeyed<Group>($, GROUP_KEY, 'groups', g => g.id)
 const loadInbox = ($: EngineInterface) => loadKeyed<Msg>($, MSG_KEY, 'inbox', m => m.key)
 
-// A set of ids, one key each; the old array form moves over on the first load.
+// A set of ids, one key each; ids in the old array are added whenever the array changes (see legacyChanged).
 async function loadFlags($: EngineInterface, prefix: string, legacyKey: string): Promise<string[]> {
   const legacy = await $.store.get(legacyKey)
-  if (Array.isArray(legacy)) {
+  if (Array.isArray(legacy) && (await legacyChanged($, legacyKey, legacy))) {
     for (const id of legacy) if (typeof id === 'string') await $.store.set(prefix + id, true)
-    await $.store.delete(legacyKey)
   }
   return (await keysWith($, prefix)).map(k => k.slice(prefix.length))
 }
@@ -494,20 +503,21 @@ async function loadFlags($: EngineInterface, prefix: string, legacyKey: string):
 // Another device's newer list replaces this one: ids it lacks go, ids it has are set.
 async function replaceFlags($: EngineInterface, prefix: string, ids: string[]) {
   const want = new Set(ids)
-  for (const key of await keysWith($, prefix)) if (!want.has(key.slice(prefix.length))) await $.store.delete(key)
+  for (const key of await keysWith($, prefix)) if (!want.has(key.slice(prefix.length))) await storeDelete($, key)
   for (const id of want) await $.store.set(prefix + id, true)
 }
 
 async function loadGone($: EngineInterface): Promise<Record<string, number>> {
-  const legacy = numberMap(await $.store.get('gone'))
-  for (const [id, at] of Object.entries(legacy)) await raiseGone($, id, at)
-  await $.store.delete('gone')
+  const legacy = await $.store.get('gone')
+  if (legacy !== undefined && (await legacyChanged($, 'gone', legacy))) {
+    for (const [id, at] of Object.entries(numberMap(legacy))) await raiseGone($, id, at)
+  }
   const out: Record<string, number> = {}
   const now = await $.clock.now()
   for (const key of await keysWith($, GONE_KEY)) {
     const at = await $.store.get(key)
     if (typeof at === 'number' && now - at < GONE_TTL_MS) out[key.slice(GONE_KEY.length)] = at
-    else await $.store.delete(key)
+    else await storeDelete($, key)
   }
   return out
 }
@@ -539,7 +549,7 @@ async function saveContact($: EngineInterface, contact: Contact) {
 }
 
 async function dropContact($: EngineInterface, id: string) {
-  await $.store.delete(CONTACT_KEY + id)
+  await storeDelete($, CONTACT_KEY + id)
   contacts = contacts.filter(c => c.id !== id)
   await markGone($, id)
   if (selected === convOf(id)) selected = ''
@@ -586,7 +596,7 @@ async function addMessages($: EngineInterface, msgs: Msg[]) {
     inbox = all
     return
   }
-  for (const m of overflow) await $.store.delete(MSG_KEY + m.key)
+  for (const m of overflow) await storeDelete($, MSG_KEY + m.key)
   const archived = new Set(overflow.map(m => m.key))
   inbox = all.filter(m => !archived.has(m.key))
   await bumpInbox($)
@@ -743,7 +753,7 @@ async function sendTyping($: EngineInterface, conv: string, value: string) {
 
 async function toggleMute($: EngineInterface, conv: string) {
   if ((await $.store.get(MUTE_KEY + conv)) === undefined) await $.store.set(MUTE_KEY + conv, true)
-  else await $.store.delete(MUTE_KEY + conv)
+  else await storeDelete($, MUTE_KEY + conv)
   muted = await loadFlags($, MUTE_KEY, 'muted')
   await touchState($, 'muted')
   void syncState($).catch(() => {})
@@ -953,14 +963,14 @@ async function mergeState($: EngineInterface, st: SyncState, fromPrimary: boolea
     else if (!fromPrimary && mine) next = { ...next, pq: mine.pq, pqPrev: mine.pqPrev }
     await $.store.set(CONTACT_KEY + c.id, next)
   }
-  for (const c of await loadContacts($)) if (!alive(c)) await $.store.delete(CONTACT_KEY + c.id)
+  for (const c of await loadContacts($)) if (!alive(c)) await storeDelete($, CONTACT_KEY + c.id)
   contacts = await loadContacts($)
   const theirGroups = asArray<unknown>(st.groups).map(cleanGroup).filter((g): g is Group => !!g)
   for (const g of theirGroups) {
     const mine = (await $.store.get(GROUP_KEY + g.id)) as Group | undefined
     if (!mine || (g.changed ?? 0) > (mine.changed ?? 0)) await $.store.set(GROUP_KEY + g.id, g)
   }
-  for (const g of await loadGroups($)) if (!alive(g)) await $.store.delete(GROUP_KEY + g.id)
+  for (const g of await loadGroups($)) if (!alive(g)) await storeDelete($, GROUP_KEY + g.id)
   groups = await loadGroups($)
 
   const at = numberMap(st.at)
@@ -1068,10 +1078,10 @@ async function announce($: EngineInterface) {
 async function resetAccount($: EngineInterface, entropy?: Uint8Array) {
   for (const key of ['secretKey', 'kemSeed', 'recovery', 'contacts', 'groups', 'inbox', 'blocked', 'gone', 'readAt', 'muted', 'stateAt', 'lastSeen',
     'linked', 'primary', 'devices', 'profile', 'profileSent', 'notices', 'typing', 'linkPending', 'activeAt']) {
-    await $.store.delete(key)
+    await storeDelete($, key)
   }
-  for (const key of await $.store.keys()) if (KEYED.some(p => key.startsWith(p))) await $.store.delete(key)
-  await $.store.delete('inboxRev')
+  for (const key of await $.store.keys()) if (KEYED.some(p => key.startsWith(p))) await storeDelete($, key)
+  await storeDelete($, 'inboxRev')
   inboxRev = {}
   // A new device id too, so a removal sent to the old one cannot be played against this device once it links again.
   deviceId = newId()
@@ -1131,7 +1141,7 @@ async function startLink($: EngineInterface): Promise<string> {
 async function cancelLink($: EngineInterface) {
   linkPending = undefined
   stopLinkPolling()
-  await $.store.delete('linkPending')
+  await storeDelete($, 'linkPending')
   await setLinkStatus($, '')
 }
 
@@ -1242,7 +1252,7 @@ async function applySnapshot($: EngineInterface, value: unknown, fromBackup = fa
   await $.store.set('secretKey', snap.secretKey)
   await $.store.set('kemSeed', snap.kemSeed)
   if (typeof snap.recovery === 'string') await $.store.set('recovery', snap.recovery)
-  else await $.store.delete('recovery')
+  else await storeDelete($, 'recovery')
   sharedKeys.clear()
   hybridKeys.clear()
   topics.clear()
@@ -1252,8 +1262,8 @@ async function applySnapshot($: EngineInterface, value: unknown, fromBackup = fa
   const now = await $.clock.now()
   const msgs = asArray<unknown>(snap.inbox).map(cleanMsg).filter((m): m is Msg => !!m)
   for (const m of msgs) shown.add(m.key)
-  for (const key of await $.store.keys()) if (KEYED.some(p => key.startsWith(p))) await $.store.delete(key)
-  for (const key of ['contacts', 'groups', 'inbox', 'blocked', 'gone', 'muted']) await $.store.delete(key)
+  for (const key of await $.store.keys()) if (KEYED.some(p => key.startsWith(p))) await storeDelete($, key)
+  for (const key of ['contacts', 'groups', 'inbox', 'blocked', 'gone', 'muted']) await storeDelete($, key)
   for (const c of asArray<unknown>(snap.contacts).map(cleanContact)) if (c) await $.store.set(CONTACT_KEY + c.id, c)
   for (const g of asArray<unknown>(snap.groups).map(cleanGroup)) if (g) await $.store.set(GROUP_KEY + g.id, g)
   for (const m of msgs) await $.store.set(MSG_KEY + m.key, m)
@@ -1270,11 +1280,11 @@ async function applySnapshot($: EngineInterface, value: unknown, fromBackup = fa
   await $.store.set('stateAt', { blocked: 0, profile: 0, muted: 0, privacy: 0, ...numberMap(snap.at) })
   if (isLang(snap.lang)) await $.store.set('lang', snap.lang)
   if (typeof snap.lastSeen === 'string') await $.store.set('lastSeen', snap.lastSeen)
-  else await $.store.delete('lastSeen')
+  else await storeDelete($, 'lastSeen')
   await $.store.set('primary', fromBackup)
   await $.store.set('linked', !fromBackup)
   await $.store.set('activeAt', now)
-  await $.store.delete('linkPending')
+  await storeDelete($, 'linkPending')
   linkPending = undefined
   primary = fromBackup
   linked = !fromBackup
@@ -1563,7 +1573,7 @@ async function writeBackup($: EngineInterface): Promise<string> {
 
 async function setBackupDir($: EngineInterface, path: string): Promise<string> {
   if (!path.trim()) {
-    await $.store.delete('backupDir')
+    await storeDelete($, 'backupDir')
     $.ui.invalidate('ui.render')
     return t('backupOff')
   }
@@ -1725,7 +1735,7 @@ async function saveGroup($: EngineInterface, group: Group) {
 }
 
 async function dropGroup($: EngineInterface, id: string) {
-  await $.store.delete(GROUP_KEY + id)
+  await storeDelete($, GROUP_KEY + id)
   groups = groups.filter(g => g.id !== id)
   await markGone($, id)
   if (selected === groupConv(id)) selected = ''
@@ -2280,7 +2290,7 @@ async function sendText($: EngineInterface, conv: string, text: string, file?: F
   const result = await fanOut($, conv, () =>
     group ? { t: 'group', id, g: group.id, name: myPublicName(), text, ...(file ? { file } : {}) } : { t: 'dm', id, name: myPublicName(), text, ...(file ? { file } : {}) })
   if (result.error) {
-    await $.store.delete(MSG_KEY + id)
+    await storeDelete($, MSG_KEY + id)
     inbox = inbox.filter(m => m.key !== id)
     await bumpInbox($)
     $.ui.invalidate('ui.render')
@@ -2323,7 +2333,7 @@ async function confirm($: EngineInterface, question: string, yes: string): Promi
 async function addContact($: EngineInterface, id: string, nickname = ''): Promise<string> {
   if (!validId(id)) return id === me ? t('ownId') : t('badId')
   if (blocked.includes(id)) {
-    await $.store.delete(BLOCK_KEY + id)
+    await storeDelete($, BLOCK_KEY + id)
     blocked = blocked.filter(b => b !== id)
   }
   const c = contactOf(id)
@@ -2374,7 +2384,7 @@ async function block($: EngineInterface, id: string) {
 }
 
 async function unblock($: EngineInterface, id: string) {
-  await $.store.delete(BLOCK_KEY + id)
+  await storeDelete($, BLOCK_KEY + id)
   blocked = blocked.filter(b => b !== id)
   await touchState($, 'blocked')
   void syncState($).catch(() => {})
@@ -2537,11 +2547,11 @@ async function migrate($: EngineInterface) {
       .map(f => ({ id: f.id, state: 'friend', profile: { username: '', displayName: '' }, nickname: f.name, at: now })))
     const name = await $.store.get('name')
     await $.store.set('profile', { username: '', displayName: typeof name === 'string' && name !== 'ben' ? name : '' })
-    for (const key of ['friends', 'pending', 'name']) await $.store.delete(key)
+    for (const key of ['friends', 'pending', 'name']) await storeDelete($, key)
   } else {
     // 0.1 and 0.2 data does not fit this protocol; all of it goes except the name.
     const name = await $.store.get('name')
-    for (const key of await $.store.keys()) await $.store.delete(key)
+    for (const key of await $.store.keys()) await storeDelete($, key)
     if (typeof name === 'string' && name !== 'ben') await $.store.set('profile', { username: '', displayName: name })
   }
   await $.store.set('version', STORE_VERSION)
