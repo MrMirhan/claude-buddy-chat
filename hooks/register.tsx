@@ -458,26 +458,33 @@ const keysWith = async ($: EngineInterface, prefix: string) => (await $.store.ke
 
 // Before 0.21 each list was one array. Its entries are copied to their own keys, and the array is never deleted: an older
 // plugin version in another session may write it at any moment, and a delete between our read and its write would lose
-// that write. Instead the array is copied again whenever it changes, and the copy runs only then.
-async function legacyChanged($: EngineInterface, legacyKey: string, legacy: unknown): Promise<boolean> {
+// that write. Instead the array is copied again whenever it changes. The array's hash is saved only after every entry
+// was copied, so a copy that fails part-way runs again on the next load.
+async function copyLegacy($: EngineInterface, legacyKey: string, legacy: unknown, copy: () => Promise<void>) {
   const hash = hex(nacl.hash(encode(JSON.stringify(legacy)))).slice(0, 32)
-  if ((await $.store.get('legacySeen:' + legacyKey)) === hash) return false
+  if ((await $.store.get('legacySeen:' + legacyKey)) === hash) return
+  try {
+    await copy()
+  } catch {
+    return
+  }
   await $.store.set('legacySeen:' + legacyKey, hash)
-  return true
 }
 
 async function loadKeyed<T extends object>($: EngineInterface, prefix: string, legacyKey: string, idOfRecord: (x: T) => unknown): Promise<T[]> {
   // An entry from the array wins only where it changed later, and an entry removed since does not come back.
   const legacy = await $.store.get(legacyKey)
-  if (Array.isArray(legacy) && (await legacyChanged($, legacyKey, legacy))) {
-    for (const x of legacy as (T & { changed?: number })[]) {
-      const id = x && typeof x === 'object' ? idOfRecord(x) : undefined
-      if (typeof id !== 'string') continue
-      const removed = await $.store.get(GONE_KEY + id)
-      if (typeof removed === 'number' && removed >= (x.changed ?? 0)) continue
-      const have = (await $.store.get(prefix + id)) as { changed?: number } | undefined
-      if (have === undefined || (x.changed ?? 0) > (have.changed ?? 0)) await $.store.set(prefix + id, x)
-    }
+  if (Array.isArray(legacy)) {
+    await copyLegacy($, legacyKey, legacy, async () => {
+      for (const x of legacy as (T & { changed?: number })[]) {
+        const id = x && typeof x === 'object' ? idOfRecord(x) : undefined
+        if (typeof id !== 'string') continue
+        const removed = await $.store.get(GONE_KEY + id)
+        if (typeof removed === 'number' && removed >= (x.changed ?? 0)) continue
+        const have = (await $.store.get(prefix + id)) as { changed?: number } | undefined
+        if (have === undefined || (x.changed ?? 0) > (have.changed ?? 0)) await $.store.set(prefix + id, x)
+      }
+    })
   }
   const out: T[] = []
   for (const key of await keysWith($, prefix)) {
@@ -491,11 +498,13 @@ const loadContacts = ($: EngineInterface) => loadKeyed<Contact>($, CONTACT_KEY, 
 const loadGroups = ($: EngineInterface) => loadKeyed<Group>($, GROUP_KEY, 'groups', g => g.id)
 const loadInbox = ($: EngineInterface) => loadKeyed<Msg>($, MSG_KEY, 'inbox', m => m.key)
 
-// A set of ids, one key each; ids in the old array are added whenever the array changes (see legacyChanged).
+// A set of ids, one key each; ids in the old array are added whenever the array changes (see copyLegacy).
 async function loadFlags($: EngineInterface, prefix: string, legacyKey: string): Promise<string[]> {
   const legacy = await $.store.get(legacyKey)
-  if (Array.isArray(legacy) && (await legacyChanged($, legacyKey, legacy))) {
-    for (const id of legacy) if (typeof id === 'string') await $.store.set(prefix + id, true)
+  if (Array.isArray(legacy)) {
+    await copyLegacy($, legacyKey, legacy, async () => {
+      for (const id of legacy) if (typeof id === 'string') await $.store.set(prefix + id, true)
+    })
   }
   return (await keysWith($, prefix)).map(k => k.slice(prefix.length))
 }
@@ -509,8 +518,10 @@ async function replaceFlags($: EngineInterface, prefix: string, ids: string[]) {
 
 async function loadGone($: EngineInterface): Promise<Record<string, number>> {
   const legacy = await $.store.get('gone')
-  if (legacy !== undefined && (await legacyChanged($, 'gone', legacy))) {
-    for (const [id, at] of Object.entries(numberMap(legacy))) await raiseGone($, id, at)
+  if (legacy !== undefined) {
+    await copyLegacy($, 'gone', legacy, async () => {
+      for (const [id, at] of Object.entries(numberMap(legacy))) await raiseGone($, id, at)
+    })
   }
   const out: Record<string, number> = {}
   const now = await $.clock.now()

@@ -1657,3 +1657,31 @@ test('a contact an older version saves to the old list while this one copies it 
   const ids = [...store.keys()].filter(k => k.startsWith('contact:')).map(k => k.slice('contact:'.length))
   expect(ids).toEqual(expect.arrayContaining([idOf(ahmet), idOf(mehmet)]))
 })
+
+test('a copy of the old list that fails part-way runs again on the next load', async ($, on) => {
+  const ahmet = nacl.box.keyPair()
+  const mehmet = nacl.box.keyPair()
+  const store = new Map<string, unknown>(Object.entries({ ...V4, contacts: [friend(ahmet, 'Ahmet'), friend(mehmet, 'Mehmet')] }))
+  let failOnce = true
+  on('store.get', (_, e) => {
+    const value = store.get((e as { key: string }).key)
+    return { value: value === undefined ? undefined : JSON.parse(JSON.stringify(value)) } as never
+  })
+  on('store.set', (_, e) => {
+    const { key, value } = e as { key: string; value: unknown }
+    // One write of the second contact fails, as a busy disk might.
+    if (failOnce && key === 'contact:' + idOf(mehmet)) {
+      failOnce = false
+      throw new Error('write failed')
+    }
+    store.set(key, JSON.parse(JSON.stringify(value)))
+    return { value: undefined } as never
+  })
+  on('store.delete', (_, e) => { store.delete((e as { key: string }).key); return { value: undefined } as never })
+  on('store.keys', () => ({ value: [...store.keys()] }) as never)
+  const w = setup(on, undefined)
+  await start($)
+  await w.clock.advance(8000)
+  const ids = [...store.keys()].filter(k => k.startsWith('contact:')).map(k => k.slice('contact:'.length))
+  expect(ids).toEqual(expect.arrayContaining([idOf(ahmet), idOf(mehmet)]))
+})
